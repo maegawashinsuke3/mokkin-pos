@@ -6,7 +6,17 @@
  *
  * デプロイ後に Settings → Variables and Secrets で
  *   ANTHROPIC_API_KEY (Secret) を設定すること。
+ *   APP_KEY (Secret) を設定すると、アプリの「読み取りの合言葉」と一致しない呼び出しを拒否する。
  * MODEL を変えたい場合は変数 MODEL を追加(省略時 claude-haiku-5-5)。
+ *
+ * ===== 共有台帳(D1) =====
+ * Settings → Bindings → Add → D1 database で変数名 DB にデータベースを紐付けると、
+ * 複数端末で同じ伝票・在庫を共有できる。テーブルは初回アクセス時に自動作成。
+ *   GET  /state           全データ取得 {slips,intake,meta}
+ *   POST /slip   {slip}   伝票を保存(上書き)
+ *   POST /intake {rec}    在庫入庫を保存
+ *   POST /intake/delete {ts} 入庫を取消
+ *   POST /meta   {k,v}    釣銭準備金・金種カウント等を保存
  */
 
 const READ_PROMPT = `あなたは手書き注文票の読み取り係です。画像は蕎麦屋「木琴」のご注文票(様式 FORM: KIK-1)です。
@@ -34,7 +44,7 @@ const READ_PROMPT = `あなたは手書き注文票の読み取り係です。�
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, x-app-key",
 };
 
 function json(obj, status = 200) {
@@ -60,9 +70,74 @@ function extractJson(text) {
   throw new Error("JSONが途中で切れています");
 }
 
+let schemaReady = false;
+async function ensureSchema(env) {
+  if (schemaReady) return;
+  await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS slips (id TEXT PRIMARY KEY, date TEXT, data TEXT, updated INTEGER)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS intake (ts TEXT PRIMARY KEY, date TEXT, data TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)"),
+  ]);
+  schemaReady = true;
+}
+
+async function handleLedger(request, env, path) {
+  if (!env.DB) return json({ ok: false, error: "共有台帳が未設定です(WorkerにD1バインディングDBを追加してください)" }, 501);
+  await ensureSchema(env);
+  if (path === "/state" && request.method === "GET") {
+    const [sl, ik, mt] = await Promise.all([
+      env.DB.prepare("SELECT data FROM slips").all(),
+      env.DB.prepare("SELECT data FROM intake").all(),
+      env.DB.prepare("SELECT k, v FROM meta").all(),
+    ]);
+    const meta = {};
+    for (const r of mt.results) meta[r.k] = r.v;
+    return json({
+      ok: true,
+      slips: sl.results.map(r => JSON.parse(r.data)),
+      intake: ik.results.map(r => JSON.parse(r.data)),
+      meta,
+    });
+  }
+  let body;
+  try { body = await request.json(); } catch (e) { return json({ ok: false, error: "JSONではありません" }, 400); }
+  if (path === "/slip") {
+    const slip = body.slip;
+    if (!slip || slip.id == null) return json({ ok: false, error: "slipがありません" }, 400);
+    await env.DB.prepare("INSERT OR REPLACE INTO slips (id, date, data, updated) VALUES (?1, ?2, ?3, ?4)")
+      .bind(String(slip.id), slip.date || "", JSON.stringify(slip), Date.now()).run();
+    return json({ ok: true });
+  }
+  if (path === "/intake") {
+    const rec = body.rec;
+    if (!rec || rec.ts == null) return json({ ok: false, error: "recがありません" }, 400);
+    await env.DB.prepare("INSERT OR REPLACE INTO intake (ts, date, data) VALUES (?1, ?2, ?3)")
+      .bind(String(rec.ts), rec.date || "", JSON.stringify(rec)).run();
+    return json({ ok: true });
+  }
+  if (path === "/intake/delete") {
+    await env.DB.prepare("DELETE FROM intake WHERE ts = ?1").bind(String(body.ts)).run();
+    return json({ ok: true });
+  }
+  if (path === "/meta") {
+    if (!body.k) return json({ ok: false, error: "kがありません" }, 400);
+    await env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES (?1, ?2)").bind(body.k, String(body.v ?? "")).run();
+    return json({ ok: true });
+  }
+  return json({ ok: false, error: "不明なパス: " + path }, 404);
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    if (env.APP_KEY) {
+      const k = request.headers.get("x-app-key") || "";
+      if (k !== env.APP_KEY) return json({ ok: false, error: "合言葉が一致しません。アプリの設定の「読み取りの合言葉」を確認してください" }, 401);
+    }
+    const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
+    if (path === "/state" || path === "/slip" || path === "/intake" || path === "/intake/delete" || path === "/meta") {
+      return handleLedger(request, env, path);
+    }
     if (request.method !== "POST") return json({ ok: false, error: "POSTで送ってください" }, 405);
     if (!env.ANTHROPIC_API_KEY) return json({ ok: false, error: "サーバーにANTHROPIC_API_KEYが設定されていません" }, 500);
 

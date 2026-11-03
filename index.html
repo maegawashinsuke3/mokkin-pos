@@ -105,6 +105,8 @@
   .sobagrid thead th { border-top: none; border-bottom: 1px solid var(--ink); }
   .sobagrid .iname { text-align: left; padding: 6px 10px; font-size: 15px; white-space: nowrap; }
   .sobagrid .iname small { display: block; font-weight: 400; font-size: 11px; color: var(--dim); }
+  .zan { float: right; font-size: 12px; font-weight: 400; color: var(--dim); margin-left: 6px; }
+  .zan.z0 { color: var(--shu); font-weight: 700; }
   .cellbtn {
     width: 100%; height: 52px; font-size: 22px; font-weight: 700;
     border-left: 1px solid var(--rule);
@@ -201,10 +203,12 @@
     <h1>木琴 注文会計</h1>
     <span class="date num" id="hdrDate"></span>
     <span style="flex:1"></span>
+    <span id="syncDot" style="font-size:12px;color:var(--dim);"></span>
     <button id="btnSettings" style="font-size:13px;color:var(--dim);border:1px solid var(--rule);padding:3px 10px;">設定</button>
   </header>
   <nav class="tabs">
     <button id="tabSlips" class="on">伝票</button>
+    <button id="tabStock">在庫</button>
     <button id="tabClose">締め</button>
   </nav>
   <main id="main"></main>
@@ -219,6 +223,15 @@
 </dialog>
 
 <input type="file" id="camInput" accept="image/*" capture="environment" style="display:none">
+<input type="file" id="libInput" accept="image/*" style="display:none">
+
+<div id="lock" style="display:none;position:fixed;inset:0;background:var(--paper);z-index:100;align-items:center;justify-content:center;flex-direction:column;gap:14px;">
+  <div style="font-size:20px;font-weight:700;letter-spacing:2px;">木琴 注文会計</div>
+  <div style="color:var(--dim);font-size:14px;">パスワードを入力してください</div>
+  <input id="lockPin" type="password" autocomplete="off" autocapitalize="off" style="width:200px;text-align:center;font-size:24px;letter-spacing:3px;border:1px solid var(--ink);background:#fff;padding:10px;outline:none;">
+  <button class="btn primary" id="lockGo" style="width:180px;">開く</button>
+  <div id="lockErr" style="color:var(--shu);font-size:14px;min-height:1.2em;"></div>
+</div>
 
 <div id="busy" style="display:none;position:fixed;inset:0;background:rgba(250,248,244,.88);z-index:50;align-items:center;justify-content:center;flex-direction:column;gap:12px;">
   <div style="font-size:20px;font-weight:700;">読み取り中…</div>
@@ -228,8 +241,13 @@
 <dialog id="dlgSettings" style="width:min(560px,92vw);">
   <p style="font-weight:700;margin-bottom:10px;">設定</p>
   <p style="font-size:14px;margin-bottom:6px;">読み取りサーバーURL(Cloudflare WorkerのURL)</p>
-  <input id="inReader" style="width:100%;border:1px solid var(--ink);background:#fff;padding:8px;font-size:14px;" placeholder="https://kikkin-reader.◯◯◯.workers.dev">
-  <p style="color:var(--dim);font-size:12px;margin:8px 0 14px;">未設定の間は撮影ボタンが使えません。手入力と読み取り貼り付けはいつでも使えます。</p>
+  <input id="inReader" style="width:100%;border:1px solid var(--ink);background:#fff;padding:8px;font-size:14px;" placeholder="https://mokkin-reader.◯◯◯.workers.dev">
+  <p style="color:var(--dim);font-size:12px;margin:8px 0 10px;">未設定の間は撮影ボタンが使えません。手入力と読み取り貼り付けはいつでも使えます。</p>
+  <p style="font-size:14px;margin-bottom:6px;">読み取りの合言葉(Workerの APP_KEY と同じ文字列)</p>
+  <input id="inAppKey" style="width:100%;border:1px solid var(--ink);background:#fff;padding:8px;font-size:14px;" placeholder="設定した場合のみ">
+  <p style="font-size:14px;margin:10px 0 6px;">アプリのパスワード(英数字4〜12文字・空にすればロックなし)</p>
+  <input id="inPin" autocomplete="off" style="width:100%;border:1px solid var(--ink);background:#fff;padding:8px;font-size:14px;" placeholder="例: mokkin">
+  <p style="color:var(--dim);font-size:12px;margin:8px 0 14px;">パスワードは端末を覗かれないための鍵です。変更も解除もこの欄でいつでもできます。忘れた場合はブラウザのサイトデータ消去でリセット(共有台帳があれば伝票は再取得されます)。</p>
   <div class="dlgbtns">
     <button class="btn ghost" id="setNo">閉じる</button>
     <button class="btn primary" id="setYes">保存する</button>
@@ -270,7 +288,143 @@ const GOODS = [
   { id: "G6", name: "缶ビール", note: "お車の確認を", price: 500 },
   { id: "G7", name: "缶ノンアルコールビール", note: "", price: 400 },
 ];
+/* ===== 物販マスタ =====
+   行を足せば伝票・会計・出数・CSVに自動で反映される。
+   stock: 消費する在庫品目(なければ空配列=在庫管理外) */
+const RETAIL = [
+  { id: "B1", name: "木琴の味(瓶)", price: 700, stock: [["S_BIN", 1]] },
+  { id: "B2", name: "村の卵(1個)", price: 100, stock: [["S_EGG_PKG", 1]] },
+  // 追加例: { id: "B3", name: "蕎麦茶(1パック)", price: 300, stock: [["S_CHA", 1]] },
+];
+
 const QTY_FLAG = 10; // この数以上は確認表示
+
+/* ===== 在庫マスタ =====
+   type: "daily"=毎朝仕込み(当日限り) / "carry"=繰越(残が翌日に持ち越し) */
+const STOCK_ITEMS = [
+  { id: "S_HOSO",   name: "細打ち麺",   unit: "玉",  type: "daily" },
+  { id: "S_ATSU",   name: "温用麺(助っ人打ち)", unit: "玉", type: "daily" },
+  { id: "S_HIRA",   name: "平打ち麺(釜揚げ用)", unit: "玉", type: "daily" },
+  { id: "S_TSUYU",  name: "温つゆ",     unit: "杯",  type: "daily" },
+  { id: "S_GOHAN",  name: "蕎麦炊きご飯(浸水)", unit: "食", type: "daily" },
+  { id: "S_NIRA",   name: "ニラ",       unit: "人前", type: "carry" },
+  { id: "S_TORORO", name: "とろろ",     unit: "人前", type: "carry" },
+  { id: "S_EGG",    name: "生卵",       unit: "個",  type: "carry" },
+  { id: "S_DASHI",  name: "出汁巻き卵", unit: "人前", type: "carry" },
+  { id: "S_GAKI",   name: "蕎麦がき",   unit: "人前", type: "carry" },
+  { id: "S_ZENZAI", name: "蕎麦ゼリーぜんざい", unit: "人前", type: "carry" },
+  { id: "S_BEER",   name: "缶ビール",   unit: "本",  type: "carry" },
+  { id: "S_NONAL",  name: "缶ノンアル", unit: "本",  type: "carry" },
+  { id: "S_BIN",    name: "木琴の味(瓶)", unit: "本", type: "carry" },
+  { id: "S_EGG_PKG", name: "販売用卵(パック済)", unit: "個", type: "carry" },
+];
+const STOCK_BY_ID = Object.fromEntries(STOCK_ITEMS.map(i => [i.id, i]));
+
+/* メニュー→材料の対応表。"noodle"印の材料は盛り(1/1.5/2)で掛け算 */
+const SIZE_MULT = { a: 1, b: 1.5, c: 2, d: 1, e: 1.5, f: 2 };
+/* 温メニューの麺は擬似ID "S_WARM"。実在庫への充当は stockBalances が行う:
+   温用麺(助っ人打ち)から先に減らし、尽きたら細打ち麺から減らす。
+   (冷用は温に転用できるが、温用は冷に使えないため。平日は温用0でよい) */
+const SOBA_RECIPE = {
+  1: [["S_HOSO", "noodle"]],                                               // 三通り盛り
+  2: [["S_HOSO", "noodle"], ["S_TORORO", 1], ["S_EGG", 1]],                // 山かけ(冷)
+  3: [["S_HIRA", "noodle"]],                                               // 釜揚げ
+  4: [["S_WARM", "noodle"], ["S_TSUYU", 1]],                               // かけ
+  5: [["S_WARM", "noodle"], ["S_TSUYU", 1], ["S_NIRA", 1], ["S_EGG", 1]],  // ニラ(月見)
+  6: [["S_WARM", "noodle"], ["S_TSUYU", 1], ["S_TORORO", 1], ["S_EGG", 1]],// 山かけ(温)
+};
+const GOODS_RECIPE = {
+  G1: [["S_GOHAN", 1]], G2: [["S_DASHI", 1]], G3: [["S_GAKI", 1]],
+  G4: [["S_ZENZAI", 1]], G5: [["S_EGG", 1]], G6: [["S_BEER", 1]], G7: [["S_NONAL", 1]],
+};
+const COURSE_RECIPE = [["S_GAKI", 1], ["S_GOHAN", 1], ["S_ZENZAI", 1]]; // コース1つあたり(蕎麦はコースの蕎麦セルで消費)
+
+/* 伝票1枚の材料消費 {itemId: qty} */
+function slipConsumption(slip) {
+  const c = {};
+  const add = (id, q) => { c[id] = (c[id] || 0) + q; };
+  for (const [id, q] of COURSE_RECIPE) add(id, q * (slip.course || 0));
+  const RETAIL_BY_ID = slipConsumption._r || (slipConsumption._r = Object.fromEntries(RETAIL.map(r => [r.id, r])));
+  for (const key in slip.items) {
+    const qty = slip.items[key];
+    if (/^B\d+$/.test(key)) {
+      const r = RETAIL_BY_ID[key];
+      if (r) for (const [id, q] of r.stock) add(id, q * qty);
+    } else if (/^G\d$/.test(key)) {
+      for (const [id, q] of (GOODS_RECIPE[key] || [])) add(id, q * qty);
+    } else {
+      const row = Number(key[0]), col = key[1];
+      for (const [id, q] of (SOBA_RECIPE[row] || [])) {
+        add(id, (q === "noodle" ? SIZE_MULT[col] : q) * qty);
+      }
+    }
+  }
+  return c;
+}
+
+/* 在庫残の計算。daily=当日の入庫-当日の消費 / carry=全入庫-全消費
+   温注文(S_WARM)は温用麺→細打ち麺の順に充当する */
+function stockBalances(dateStr) {
+  const intake = DB.intake || [];
+  const inSum = {};
+  for (const it of STOCK_ITEMS) inSum[it.id] = 0;
+  for (const rec of intake) {
+    const it = STOCK_BY_ID[rec.item];
+    if (!it) continue;
+    if (it.type === "daily" ? rec.date === dateStr : rec.date <= dateStr) inSum[rec.item] += rec.qty;
+  }
+  const consSum = {};
+  for (const slip of DB.slips) {
+    if (slip.status === "void") continue;
+    const cons = slipConsumption(slip);
+    for (const id in cons) {
+      const it = STOCK_BY_ID[id];
+      const isDaily = it ? it.type === "daily" : true; // S_WARM(擬似)は毎朝型扱い
+      if (isDaily ? slip.date === dateStr : slip.date <= dateStr) consSum[id] = (consSum[id] || 0) + cons[id];
+    }
+  }
+  const warm = consSum["S_WARM"] || 0;
+  const fromAtsu = Math.min(warm, inSum["S_ATSU"] || 0);
+  consSum["S_ATSU"] = (consSum["S_ATSU"] || 0) + fromAtsu;
+  consSum["S_HOSO"] = (consSum["S_HOSO"] || 0) + (warm - fromAtsu);
+  delete consSum["S_WARM"];
+  const bal = {};
+  for (const it of STOCK_ITEMS) bal[it.id] = inSum[it.id] - (consSum[it.id] || 0);
+  return bal;
+}
+function fmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(1); }
+
+/* メニュー別「あと何食」(普通盛り換算・各メニュー単独での上限。材料は共有なので目安) */
+function menuRemaining(dateStr) {
+  const bal = stockBalances(dateStr);
+  const noodleCold = bal.S_HOSO;
+  const noodleWarm = bal.S_HOSO + bal.S_ATSU; // 温は温用+細打ちの両方を使える
+  const res = {};
+  const availOf = (id) => id === "S_WARM" ? noodleWarm : (id === "S_HOSO" ? noodleCold : bal[id]);
+  for (const sb of SOBA) {
+    let m = Infinity;
+    for (const [id, q] of SOBA_RECIPE[sb.row]) {
+      m = Math.min(m, q === "noodle" ? availOf(id) : bal[id] / q);
+    }
+    res["R" + sb.row] = Math.max(0, Math.floor(m));
+  }
+  for (const gid in GOODS_RECIPE) {
+    let m = Infinity;
+    for (const [id, q] of GOODS_RECIPE[gid]) m = Math.min(m, bal[id] / q);
+    res[gid] = Math.max(0, Math.floor(m));
+  }
+  let mc = Infinity;
+  for (const [id, q] of COURSE_RECIPE) mc = Math.min(mc, bal[id] / q);
+  res["C"] = Math.max(0, Math.floor(mc));
+  for (const r of RETAIL) {
+    if (!r.stock.length) { res[r.id] = Infinity; continue; }
+    let m = Infinity;
+    for (const [id, q] of r.stock) m = Math.min(m, bal[id] / q);
+    res[r.id] = Math.max(0, Math.floor(m));
+  }
+  return res;
+}
+function zanTag(n) { return '<span class="zan' + (n <= 0 ? " z0" : "") + '">あと' + n + "</span>"; }
 
 /* ================= 保存 ================= */
 const STORE_KEY = "kikkin_pos_v1";
@@ -279,12 +433,94 @@ function load() {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) return JSON.parse(raw);
   } catch (e) {}
-  return { slips: [], seq: 1, prep: {} }; // prep: {date: 釣銭準備金}
+  return { slips: [], seq: 1, prep: {}, intake: [] }; // prep: {date: 釣銭準備金} intake: 在庫入庫
 }
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); } catch (e) {}
 }
 let DB = load();
+
+/* ================= 共有台帳との同期 =================
+   readerUrl が設定されていれば、同じWorkerの /state /slip /intake /meta を使って
+   複数端末で台帳を共有する。書き込みは即時送信、失敗分は pending に貯めて再送。 */
+function remoteOn() { const c = loadCfg(); return !!c.readerUrl; }
+function setSync(ok, msg) {
+  const el = document.getElementById("syncDot");
+  if (!el) return;
+  if (!remoteOn()) { el.textContent = ""; return; }
+  if (ok) { el.textContent = "共有✓"; el.style.color = "var(--dim)"; }
+  else { el.textContent = "未同期"; el.style.color = "var(--shu)"; el.title = msg || ""; }
+}
+async function api(path, method, body) {
+  const c = loadCfg();
+  const h = {};
+  if (body) h["Content-Type"] = "application/json";
+  if (c.appKey) h["x-app-key"] = c.appKey;
+  const res = await fetch(c.readerUrl.replace(/\/+$/, "") + path, {
+    method, headers: h, body: body ? JSON.stringify(body) : undefined,
+  });
+  const out = await res.json();
+  if (!out.ok) throw new Error(out.error || ("HTTP " + res.status));
+  return out;
+}
+function queueOp(path, body) {
+  if (!remoteOn()) return;
+  if (!DB.pending) DB.pending = [];
+  DB.pending.push({ path, body });
+  save();
+  flushPending();
+}
+let flushing = false;
+async function flushPending() {
+  if (flushing || !remoteOn() || !DB.pending || !DB.pending.length) { if (remoteOn()) setSync(!(DB.pending && DB.pending.length)); return; }
+  flushing = true;
+  try {
+    while (DB.pending.length) {
+      await api(DB.pending[0].path, "POST", DB.pending[0].body);
+      DB.pending.shift(); save();
+    }
+    setSync(true);
+  } catch (e) { setSync(false, e.message); }
+  flushing = false;
+}
+function cleanSlip(slip) { const c = { ...slip }; delete c.payTmp; return c; }
+const _pushTimers = {};
+function schedulePushSlip(slip) {
+  if (!remoteOn()) return;
+  clearTimeout(_pushTimers[slip.id]);
+  _pushTimers[slip.id] = setTimeout(() => queueOp("/slip", { slip: cleanSlip(slip) }), 700);
+}
+function pushSlipNow(slip) {
+  if (!remoteOn()) return;
+  clearTimeout(_pushTimers[slip.id]);
+  queueOp("/slip", { slip: cleanSlip(slip) });
+}
+const _metaTimers = {};
+function schedulePushMeta(k, getVal) {
+  if (!remoteOn()) return;
+  clearTimeout(_metaTimers[k]);
+  _metaTimers[k] = setTimeout(() => queueOp("/meta", { k, v: getVal() }), 700);
+}
+async function fetchState() {
+  if (!remoteOn()) return;
+  await flushPending();
+  if (DB.pending && DB.pending.length) return; // 未送信が残るうちは上書きしない
+  try {
+    const out = await api("/state", "GET");
+    DB.slips = out.slips || [];
+    DB.intake = out.intake || [];
+    DB.prep = {}; DB.denoms = {};
+    for (const k in (out.meta || {})) {
+      if (k.startsWith("prep:")) DB.prep[k.slice(5)] = Number(out.meta[k]) || 0;
+      if (k.startsWith("denoms:")) { try { DB.denoms[k.slice(7)] = JSON.parse(out.meta[k]); } catch (e) {} }
+    }
+    save();
+    setSync(true);
+  } catch (e) { setSync(false, e.message); }
+}
+function refreshSoon() { fetchState().then(() => render()); }
+function genId() { return Date.now() * 100 + Math.floor(Math.random() * 100); }
+function shortId(id) { const t = String(id); return t.length > 5 ? t.slice(-5) : t; }
 
 /* ================= ユーティリティ ================= */
 const yen = n => "¥" + n.toLocaleString("ja-JP");
@@ -325,8 +561,13 @@ function slipLines(slip) {
     const q = slip.items[g.id] || 0;
     if (q > 0) lines.push({ name: g.name, qty: q, unit: g.price, amt: q * g.price });
   }
+  for (const r of RETAIL) {
+    const q = slip.items[r.id] || 0;
+    if (q > 0) lines.push({ name: "物販 " + r.name, qty: q, unit: r.price, amt: q * r.price, retail: true });
+  }
   return lines;
 }
+function slipRetailTotal(slip) { return slipLines(slip).filter(l => l.retail).reduce((a, l) => a + l.amt, 0); }
 function slipTotal(slip) { return slipLines(slip).reduce((a, l) => a + l.amt, 0); }
 function courseSelCount(slip) {
   let n = 0;
@@ -339,6 +580,11 @@ function slipWarnings(slip) {
   if (c !== sel && (c > 0 || sel > 0)) w.push("コースの数(" + c + ")とコースの蕎麦の合計(" + sel + ")が合いません");
   if ((slip.items["G6"] || 0) > 0) w.push("缶ビールあり。お車を運転されるか確認を");
   for (const k in slip.items) if (slip.items[k] >= QTY_FLAG) w.push("数量" + slip.items[k] + "の品があります。数の確認を");
+  if (slip.status !== "paid") {
+    const bal = stockBalances(slip.date);
+    const short = STOCK_ITEMS.filter(it => bal[it.id] < 0);
+    for (const it of short) w.push("在庫不足: " + it.name + "(残 " + fmtQty(bal[it.id]) + it.unit + ")。仕込み入力か実物の確認を");
+  }
   return w;
 }
 
@@ -349,13 +595,14 @@ function findSlip(id) { return DB.slips.find(s => s.id === id); }
 
 function newSlip() {
   const slip = {
-    id: DB.seq++,
+    id: genId(),
     date: today(), time: nowTime(),
     table: "", status: "open",
     course: 0, items: {},
     pay: null, tendered: null,
   };
   DB.slips.push(slip); save();
+  pushSlipNow(slip);
   view = { ...view, mode: "edit", slipId: slip.id };
   render();
 }
@@ -366,8 +613,10 @@ const main = document.getElementById("main");
 function render() {
   document.getElementById("hdrDate").textContent = today();
   document.getElementById("tabSlips").className = view.tab === "slips" ? "on" : "";
+  document.getElementById("tabStock").className = view.tab === "stock" ? "on" : "";
   document.getElementById("tabClose").className = view.tab === "close" ? "on" : "";
   if (view.tab === "close") { renderClose(); return; }
+  if (view.tab === "stock") { renderStock(); return; }
   if (view.mode === "edit") { renderEditor(); return; }
   if (view.mode === "pay") { renderPay(); return; }
   renderList();
@@ -376,17 +625,24 @@ function render() {
 /* ---- 伝票一覧 ---- */
 function renderList() {
   const slips = DB.slips.filter(s => s.date === today() && s.status !== "void").sort((a, b) => b.id - a.id);
-  let h = '<button class="newslip" id="btnShot" style="background:var(--shu);border:1px solid var(--shu);">📷 注文票を撮影して読み取り</button>' +
+  let h = '<button class="newslip" id="btnShot" style="background:var(--shu);border:1px solid var(--shu);margin-bottom:8px;">📷 注文票を撮影して読み取り</button>' +
+    '<button class="newslip" id="btnLib" style="background:#fff;color:var(--ink);font-size:15px;padding:10px;">撮影済みの写真から読み取り</button>' +
     '<div style="display:flex;gap:8px;margin-bottom:14px;">' +
     '<button class="newslip" id="btnNew" style="margin-bottom:0;flex:1.3;">＋ 新規伝票(手入力)</button>' +
     '<button class="newslip" id="btnPaste" style="margin-bottom:0;flex:1;background:#fff;color:var(--ink);font-size:15px;white-space:nowrap;padding:14px 8px;">読み取り貼り付け</button>' +
     '</div><div class="sliplist">';
   if (!slips.length) h += '<div class="empty">本日の伝票はまだありません</div>';
+  const nowMin = (() => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); })();
   for (const s of slips) {
     const t = slipTotal(s);
+    let elapsed = "";
+    if (s.status === "open" && /^\d\d:\d\d$/.test(s.time)) {
+      const m = nowMin - (Number(s.time.slice(0, 2)) * 60 + Number(s.time.slice(3)));
+      if (m >= 0) elapsed = '　<span style="color:' + (m >= 30 ? "var(--shu)" : "inherit") + ';font-weight:700;">' + m + "分</span>";
+    }
     h += '<button class="slipcard ' + (s.status === "paid" ? "paid" : "") + '" data-id="' + s.id + '">' +
       '<span class="tno num">卓 ' + esc(s.table || "−") + '</span>' +
-      '<span class="meta num">#' + s.id + "　" + s.time + (s.pay ? "　" + s.pay : "") + "</span>" +
+      '<span class="meta num">#' + shortId(s.id) + "　" + s.time + (s.pay ? "　" + s.pay : "") + elapsed + "</span>" +
       '<span class="st ' + s.status + '">' + (s.status === "paid" ? "会計済" : "未会計") + "</span>" +
       '<span class="amt num">' + yen(t) + "</span></button>";
   }
@@ -395,6 +651,7 @@ function renderList() {
   document.getElementById("btnNew").onclick = newSlip;
   document.getElementById("btnPaste").onclick = openPaste;
   document.getElementById("btnShot").onclick = startShot;
+  document.getElementById("btnLib").onclick = startLib;
   main.querySelectorAll(".slipcard").forEach(el => el.onclick = () => {
     view = { ...view, mode: "edit", slipId: Number(el.dataset.id) };
     render();
@@ -412,14 +669,16 @@ function renderEditor() {
     '<button class="back" id="btnBack">◀ 一覧</button>' +
     '<div class="tablepick"><span class="lbl">卓番号</span><input id="inTable" class="num" inputmode="numeric" value="' + esc(slip.table) + '"' + (paid ? " disabled" : "") + "></div>" +
     '<div class="sp"></div>' +
-    '<span class="meta num" style="color:var(--dim);font-size:13px;align-self:center;">#' + slip.id + "　" + slip.time + "</span>" +
+    '<span class="meta num" style="color:var(--dim);font-size:13px;align-self:center;">#' + shortId(slip.id) + "　" + slip.time + "</span>" +
     "</div>";
 
   for (const w of warns) h += '<div class="warn">' + esc(w) + "</div>";
   if (slip.readFlags) for (const w of slip.readFlags) h += '<div class="warn">' + esc(w) + "</div>";
 
+  const rem = menuRemaining(slip.date);
+
   /* コース */
-  h += '<section class="block"><h2>木琴蕎麦づくしコース <span class="note">' + yen(COURSE_PRICE) + '・蕎麦はコースの蕎麦欄で</span></h2>' +
+  h += '<section class="block"><h2>木琴蕎麦づくしコース <span class="note">' + yen(COURSE_PRICE) + '・蕎麦はコースの蕎麦欄で</span>' + zanTag(rem["C"]) + '</h2>' +
     '<div class="courserow"><div class="nm">コースの数</div>' + stepper("C", slip.course, paid) + "</div></section>";
 
   /* 蕎麦グリッド */
@@ -429,7 +688,7 @@ function renderEditor() {
     '<tr><th class="iname"></th><th>普通</th><th>大盛</th><th>倍盛</th>' +
     '<th style="border-left:1px solid var(--ink);">普通</th><th>大盛</th><th>倍盛</th></tr></thead><tbody>';
   for (const s of SOBA) {
-    h += '<tr><td class="iname">' + esc(s.name) + (s.yomi ? "<small>" + s.yomi + "</small>" : "") + "</td>";
+    h += '<tr><td class="iname">' + esc(s.name) + zanTag(rem["R" + s.row]) + (s.yomi ? "<small>" + s.yomi + "</small>" : "") + "</td>";
     for (const col of ["a", "b", "c", "d", "e", "f"]) {
       const key = s.row + col;
       const q = slip.items[key] || 0;
@@ -443,7 +702,14 @@ function renderEditor() {
   /* 一品 */
   h += '<section class="block"><h2>一品・トッピング・飲み物</h2><div class="goods">';
   for (const g of GOODS) {
-    h += '<div class="gitem"><div class="nm">' + esc(g.name) + "<small>" + yen(g.price) + (g.note ? "・" + esc(g.note) : "") + "</small></div>" + stepper(g.id, slip.items[g.id] || 0, paid) + "</div>";
+    h += '<div class="gitem"><div class="nm">' + esc(g.name) + zanTag(rem[g.id]) + "<small>" + yen(g.price) + (g.note ? "・" + esc(g.note) : "") + "</small></div>" + stepper(g.id, slip.items[g.id] || 0, paid) + "</div>";
+  }
+  h += "</div></section>";
+
+  /* 物販 */
+  h += '<section class="block"><h2>物販(レジ横)</h2><div class="goods">';
+  for (const r of RETAIL) {
+    h += '<div class="gitem"><div class="nm">' + esc(r.name) + (res => res === Infinity ? "" : zanTag(res))(rem[r.id]) + "<small>" + yen(r.price) + "</small></div>" + stepper(r.id, slip.items[r.id] || 0, paid) + "</div>";
   }
   h += "</div></section>";
 
@@ -463,7 +729,7 @@ function renderEditor() {
 
   document.getElementById("btnBack").onclick = () => { view.mode = "list"; render(); };
   const inTable = document.getElementById("inTable");
-  if (inTable && !paid) inTable.oninput = () => { slip.table = inTable.value.trim(); save(); };
+  if (inTable && !paid) inTable.oninput = () => { slip.table = inTable.value.trim(); save(); schedulePushSlip(slip); };
 
   if (!paid) {
     main.querySelectorAll("[data-cell]").forEach(el => {
@@ -489,13 +755,13 @@ function renderEditor() {
     });
     const bv = document.getElementById("btnVoid");
     if (bv) bv.onclick = () => confirmDlg("この伝票を削除しますか?", () => {
-      slip.status = "void"; save(); view.mode = "list"; render();
+      slip.status = "void"; save(); pushSlipNow(slip); view.mode = "list"; render();
     });
     const bp = document.getElementById("btnPay");
     if (bp) bp.onclick = () => { view.mode = "pay"; render(); };
   } else {
     document.getElementById("btnUnpay").onclick = () => confirmDlg("会計を取り消して未会計に戻しますか?", () => {
-      slip.status = "open"; slip.pay = null; slip.tendered = null; save(); render();
+      slip.status = "open"; slip.pay = null; slip.tendered = null; save(); pushSlipNow(slip); render();
     });
   }
 }
@@ -514,7 +780,7 @@ function bump(slip, key, dir) {
     const q = Math.max(0, (slip.items[key] || 0) + dir);
     if (q === 0) delete slip.items[key]; else slip.items[key] = q;
   }
-  save(); render();
+  save(); schedulePushSlip(slip); render();
 }
 
 /* ---- 会計 ---- */
@@ -526,7 +792,7 @@ function renderPay() {
   if (!slip.payTmp) slip.payTmp = "現金";
 
   let h = '<div class="ed-top"><button class="back" id="btnBack">◀ 伝票に戻る</button>' +
-    '<div class="sp"></div><span style="font-size:15px;align-self:center;">卓 <b class="num">' + esc(slip.table || "−") + "</b>　#" + slip.id + "</span></div>";
+    '<div class="sp"></div><span style="font-size:15px;align-self:center;">卓 <b class="num">' + esc(slip.table || "−") + "</b>　#" + shortId(slip.id) + "</span></div>";
 
   h += '<div class="billlines">';
   for (const l of lines) {
@@ -571,6 +837,7 @@ function renderPay() {
     if (bd.disabled) return;
     slip.status = "paid"; slip.pay = slip.payTmp; delete slip.payTmp;
     slip.paidAt = nowTime(); save();
+    pushSlipNow(slip);
     view.mode = "list"; render();
   };
 }
@@ -609,6 +876,7 @@ function renderClose() {
 
   h += '<div class="close-sec"><h2>売上(' + D + ')</h2>' +
     '<div class="kv big"><span>売上合計(会計済 ' + paidSlips.length + '件)</span><b class="num">' + yen(sales) + "</b></div>" +
+    '<div class="kv"><span>うち物販</span><b class="num">' + yen(paidSlips.reduce((a, s2) => a + slipRetailTotal(s2), 0)) + "</b></div>" +
     '<div class="kv"><span>現金</span><b class="num">' + yen(cash) + "</b></div>" +
     '<div class="kv"><span>QR決済</span><b class="num">' + yen(qr) + "</b></div>" +
     (openSlips.length ? '<div class="kv"><span class="warnv">未会計の伝票</span><b class="warnv num">' + openSlips.length + "件</b></div>" : "") +
@@ -640,13 +908,17 @@ function renderClose() {
   main.innerHTML = h;
   document.getElementById("selDate").onchange = e => { view.closeDate = e.target.value; render(); };
   document.getElementById("inPrep").onchange = e => {
-    DB.prep[D] = Number(e.target.value.replace(/[^0-9]/g, "")) || 0; save(); render();
+    DB.prep[D] = Number(e.target.value.replace(/[^0-9]/g, "")) || 0; save();
+    schedulePushMeta("prep:" + D, () => String(DB.prep[D] || 0));
+    render();
   };
   main.querySelectorAll("[data-dn]").forEach(el => el.onclick = () => {
     const f = el.dataset.dn;
     if (!DB.denoms[D]) DB.denoms[D] = {};
     DB.denoms[D][f] = Math.max(0, (DB.denoms[D][f] || 0) + Number(el.dataset.dir));
-    save(); render();
+    save();
+    schedulePushMeta("denoms:" + D, () => JSON.stringify(DB.denoms[D] || {}));
+    render();
   });
   document.getElementById("btnCsv").onclick = () => downloadCsv(D, slips);
   document.getElementById("btnCsvSum").onclick = () => downloadDaily(D, sales, cash, qr, counts, prep, counted, diff);
@@ -674,6 +946,13 @@ function downloadDaily(D, sales, cash, qr, counts, prep, counted, diff) {
   const rows = [["日付", D], ["売上合計", sales], ["現金売上", cash], ["QR売上", qr],
     ["釣銭準備金", prep], ["実査計", counted], ["差額", diff], [], ["品目", "出数"]];
   for (const k in counts) rows.push([k, counts[k]]);
+  rows.push([]);
+  rows.push(["在庫品目", "区分", "本日入庫", "残"]);
+  const bal = stockBalances(D);
+  for (const it of STOCK_ITEMS) {
+    const inQ = (DB.intake || []).filter(r => r.date === D && r.item === it.id).reduce((a, r) => a + r.qty, 0);
+    rows.push([it.name, it.type === "daily" ? "毎朝" : "繰越", inQ, bal[it.id]]);
+  }
   downloadFile("木琴_日計_" + D + ".csv", rows.map(r => r.map(csvCell).join(",")).join("\n"));
 }
 
@@ -684,6 +963,76 @@ function confirmDlg(msg, fn) {
   dlg.showModal();
   document.getElementById("dlgYes").onclick = () => { dlg.close(); fn(); };
   document.getElementById("dlgNo").onclick = () => dlg.close();
+}
+
+/* ---- 在庫画面 ---- */
+function renderStock() {
+  const D = today();
+  const bal = stockBalances(D);
+  const intakeToday = (DB.intake || []).filter(r => r.date === D);
+
+  let h = '<div class="close-sec"><h2>本日の残(' + D + ')</h2>';
+  for (const it of STOCK_ITEMS) {
+    const b = bal[it.id];
+    const warn = b <= 0 ? ' class="warnv"' : "";
+    h += '<div class="kv"><span>' + esc(it.name) +
+      ' <span style="color:var(--dim);font-size:12px;">' + (it.type === "daily" ? "毎朝仕込み" : "繰越") + "</span></span>" +
+      "<b" + warn + ' class="num">' + fmtQty(b) + " " + it.unit + "</b></div>";
+  }
+  h += '</div>';
+
+  const rem = menuRemaining(D);
+  h += '<div class="close-sec"><h2>メニュー別の目安(あと何食・普通盛り換算)</h2>';
+  h += '<div class="kv"><span>木琴蕎麦づくしコース</span><b class="num' + (rem["C"] <= 0 ? " warnv" : "") + '">' + rem["C"] + "</b></div>";
+  for (const sb of SOBA) {
+    const n = rem["R" + sb.row];
+    h += '<div class="kv"><span>' + esc(sb.name) + '</span><b class="num' + (n <= 0 ? " warnv" : "") + '">' + n + "</b></div>";
+  }
+  for (const g of GOODS) {
+    const n = rem[g.id];
+    h += '<div class="kv"><span>' + esc(g.name) + '</span><b class="num' + (n <= 0 ? " warnv" : "") + '">' + n + "</b></div>";
+  }
+  for (const r of RETAIL) {
+    const n = rem[r.id];
+    if (n === Infinity) continue;
+    h += '<div class="kv"><span>物販 ' + esc(r.name) + '</span><b class="num' + (n <= 0 ? " warnv" : "") + '">' + n + "</b></div>";
+  }
+  h += '<div class="kv"><span style="color:var(--dim);font-size:12px;">材料は品目間で共有のため、各行は「その品だけ出した場合」の上限です</span><b></b></div>';
+  h += "</div>";
+
+  h += '<div class="close-sec"><h2>仕込み・入庫を記録</h2><div style="padding:10px 12px;">' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
+    '<select id="inItem" style="flex:2;min-width:160px;padding:10px;font-size:16px;border:1px solid var(--ink);background:#fff;">';
+  for (const it of STOCK_ITEMS) h += '<option value="' + it.id + '">' + esc(it.name) + "(" + it.unit + ")</option>";
+  h += '</select>' +
+    '<input id="inQty" class="num" inputmode="decimal" placeholder="数" style="flex:1;min-width:70px;padding:10px;font-size:18px;font-weight:700;color:var(--shu);border:1px solid var(--ink);background:#fff;text-align:right;">' +
+    '<button class="btn primary" id="btnIntake">追加</button></div>' +
+    '<p style="color:var(--dim);font-size:12px;margin-top:8px;">毎朝仕込みの品は当日限り(翌日に持ち越しません)。繰越の品は残がそのまま明日に続きます。温かい蕎麦は温用麺から先に減り、尽きると細打ち麺から減ります(平日は温用麺0のままでOK)。</p>' +
+    "</div></div>";
+
+  h += '<div class="close-sec"><h2>本日の入庫記録</h2>';
+  if (!intakeToday.length) h += '<div class="kv"><span style="color:var(--dim)">まだありません</span><b></b></div>';
+  for (const r of intakeToday) {
+    const it = STOCK_BY_ID[r.item];
+    h += '<div class="kv"><span>' + esc(it ? it.name : r.item) + ' <span style="color:var(--dim);font-size:12px;">' + r.time + "</span></span>" +
+      '<span><b class="num">+' + fmtQty(r.qty) + "</b>　<button data-rmintake=\"" + r.ts + '" style="color:var(--shu);border:1px solid var(--rule);padding:2px 8px;font-size:12px;">取消</button></span></div>';
+  }
+  h += "</div>";
+
+  main.innerHTML = h;
+  document.getElementById("btnIntake").onclick = () => {
+    const item = document.getElementById("inItem").value;
+    const q = parseFloat(document.getElementById("inQty").value);
+    if (!q || q <= 0) return;
+    if (!DB.intake) DB.intake = [];
+    const rec = { ts: Date.now(), date: today(), time: nowTime(), item, qty: q };
+    DB.intake.push(rec);
+    save(); queueOp("/intake", { rec }); render();
+  };
+  main.querySelectorAll("[data-rmintake]").forEach(el => el.onclick = () => {
+    DB.intake = DB.intake.filter(r => String(r.ts) !== el.dataset.rmintake);
+    save(); queueOp("/intake/delete", { ts: el.dataset.rmintake }); render();
+  });
 }
 
 /* ---- 読み取り結果の取り込み ---- */
@@ -697,7 +1046,7 @@ function importJson(text) {
   let data;
   try { data = JSON.parse(text); } catch (e) { throw new Error("JSONとして読めません: " + e.message); }
   const slip = {
-    id: DB.seq++, date: today(), time: nowTime(),
+    id: genId(), date: today(), time: nowTime(),
     table: "", status: "open", course: 0, items: {}, pay: null, tendered: null,
   };
   const t = data["卓番号"] ?? data.table ?? data.T;
@@ -718,6 +1067,7 @@ function importJson(text) {
   if (bad.length) throw new Error("不明なセル番地: " + bad.join(", "));
   if (!slip.course && !Object.keys(slip.items).length) throw new Error("注文の中身が見つかりません");
   DB.slips.push(slip); save();
+  pushSlipNow(slip);
   return slip;
 }
 const dlgPaste = document.getElementById("dlgPaste");
@@ -747,33 +1097,52 @@ function saveCfg(c) { try { localStorage.setItem(CFG_KEY, JSON.stringify(c)); } 
 const dlgSettings = document.getElementById("dlgSettings");
 document.getElementById("btnSettings").onclick = openSettings;
 function openSettings() {
-  document.getElementById("inReader").value = loadCfg().readerUrl || "";
+  const c = loadCfg();
+  document.getElementById("inReader").value = c.readerUrl || "";
+  document.getElementById("inAppKey").value = c.appKey || "";
+  document.getElementById("inPin").value = c.pin || "";
   dlgSettings.showModal();
 }
 document.getElementById("setNo").onclick = () => dlgSettings.close();
 document.getElementById("setYes").onclick = () => {
   const c = loadCfg();
   c.readerUrl = document.getElementById("inReader").value.trim();
+  c.appKey = document.getElementById("inAppKey").value.trim();
+  const pin = document.getElementById("inPin").value.trim();
+  if (pin && !/^[A-Za-z0-9]{4,12}$/.test(pin)) { alert("パスワードは英数字4〜12文字にしてください"); return; }
+  c.pin = pin;
   saveCfg(c); dlgSettings.close(); render();
+  refreshSoon();
 };
 
 /* ---- 撮影して読み取り ---- */
 const camInput = document.getElementById("camInput");
+const libInput = document.getElementById("libInput");
 const busy = document.getElementById("busy");
 function startShot() {
   if (!loadCfg().readerUrl) { openSettings(); return; }
   camInput.value = "";
   camInput.click();
 }
-camInput.addEventListener("change", async () => {
-  const file = camInput.files && camInput.files[0];
+function startLib() {
+  if (!loadCfg().readerUrl) { openSettings(); return; }
+  libInput.value = "";
+  libInput.click();
+}
+camInput.addEventListener("change", () => readShot(camInput));
+libInput.addEventListener("change", () => readShot(libInput));
+async function readShot(inputEl) {
+  const file = inputEl.files && inputEl.files[0];
   if (!file) return;
   busy.style.display = "flex";
   try {
     const b64 = await shrinkToBase64(file, 1600, 0.85);
-    const res = await fetch(loadCfg().readerUrl, {
+    const cfg = loadCfg();
+    const hdrs = { "Content-Type": "application/json" };
+    if (cfg.appKey) hdrs["x-app-key"] = cfg.appKey;
+    const res = await fetch(cfg.readerUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: hdrs,
       body: JSON.stringify({ image: b64, media_type: "image/jpeg" }),
     });
     const out = await res.json();
@@ -790,7 +1159,7 @@ camInput.addEventListener("change", async () => {
   } finally {
     busy.style.display = "none";
   }
-});
+}
 
 /* 画像を縮小してbase64(JPEG)にする */
 function shrinkToBase64(file, maxSide, quality) {
@@ -815,10 +1184,41 @@ function shrinkToBase64(file, maxSide, quality) {
 }
 
 /* ---- タブ ---- */
-document.getElementById("tabSlips").onclick = () => { view.tab = "slips"; view.mode = "list"; render(); };
-document.getElementById("tabClose").onclick = () => { view.tab = "close"; render(); };
+document.getElementById("tabSlips").onclick = () => { view.tab = "slips"; view.mode = "list"; render(); refreshSoon(); };
+document.getElementById("tabStock").onclick = () => { view.tab = "stock"; render(); refreshSoon(); };
+document.getElementById("tabClose").onclick = () => { view.tab = "close"; render(); refreshSoon(); };
+
+/* ---- パスコードロック ---- */
+(function initLock() {
+  const pin = loadCfg().pin;
+  let unlocked = false;
+  try { unlocked = sessionStorage.getItem("kikkin_unlocked") === "1"; } catch (e) {}
+  if (!pin || unlocked) return;
+  const lock = document.getElementById("lock");
+  lock.style.display = "flex";
+  const inp = document.getElementById("lockPin");
+  const tryOpen = () => {
+    if (inp.value === pin) {
+      try { sessionStorage.setItem("kikkin_unlocked", "1"); } catch (e) {}
+      lock.style.display = "none";
+    } else {
+      document.getElementById("lockErr").textContent = "違います";
+      inp.value = ""; inp.focus();
+    }
+  };
+  document.getElementById("lockGo").onclick = tryOpen;
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") tryOpen(); });
+  setTimeout(() => inp.focus(), 100);
+})();
 
 render();
+fetchState().then(() => render());
+setInterval(() => {
+  if (document.visibilityState !== "visible") return;
+  if (view.mode === "edit" || view.mode === "pay") return;
+  if ((dlgSettings && dlgSettings.open) || (dlgPaste && dlgPaste.open) || (dlg && dlg.open)) return;
+  fetchState().then(() => render());
+}, 25000);
 
 /* ================= QA用シナリオ(?qa=1) ================= */
 if (location.search.includes("qa=")) {
@@ -838,12 +1238,30 @@ if (location.search.includes("qa=")) {
     DB.slips.push({ id: DB.seq++, date: today(), time: "12:01", table: "1", status: "open", course: 0,
       items: { "4a": 2, "G4": 2 }, pay: null, tendered: null });
     DB.prep[today()] = 20000;
+    DB.intake = [
+      { ts: 1, date: today(), time: "07:30", item: "S_HOSO", qty: 40 },
+      { ts: 2, date: today(), time: "07:30", item: "S_HIRA", qty: 10 },
+      { ts: 3, date: today(), time: "07:45", item: "S_TSUYU", qty: 30 },
+      { ts: 4, date: today(), time: "08:00", item: "S_GOHAN", qty: 5 },
+      { ts: 5, date: today(), time: "08:00", item: "S_NIRA", qty: 6 },
+      { ts: 6, date: today(), time: "08:00", item: "S_TORORO", qty: 8 },
+      { ts: 7, date: today(), time: "08:00", item: "S_EGG", qty: 30 },
+      { ts: 8, date: today(), time: "08:00", item: "S_DASHI", qty: 6 },
+      { ts: 9, date: today(), time: "08:00", item: "S_GAKI", qty: 10 },
+      { ts: 10, date: today(), time: "08:00", item: "S_ZENZAI", qty: 10 },
+      { ts: 11, date: today(), time: "08:00", item: "S_BEER", qty: 12 },
+      { ts: 12, date: today(), time: "08:00", item: "S_NONAL", qty: 6 },
+      { ts: 13, date: today(), time: "08:00", item: "S_BIN", qty: 8 },
+      { ts: 14, date: today(), time: "08:00", item: "S_EGG_PKG", qty: 18 },
+    ];
+    DB.slips[0].items["B1"] = 1; DB.slips[0].items["B2"] = 6;
     DB.denoms = {}; DB.denoms[today()] = { "5000": 1, "1000": 1, "500": 1, "100": 1 };
     save();
     const q = new URLSearchParams(location.search).get("qa");
     if (q === "edit") { view = { tab: "slips", mode: "edit", slipId: s2.id, closeDate: today() }; }
     else if (q === "pay") { s2.payTmp = "現金"; s2.tendered = 50000; view = { tab: "slips", mode: "pay", slipId: s2.id, closeDate: today() }; }
     else if (q === "close") { view = { tab: "close", mode: "list", slipId: null, closeDate: today() }; }
+    else if (q === "stock") { view = { tab: "stock", mode: "list", slipId: null, closeDate: today() }; }
     else { view = { tab: "slips", mode: "list", slipId: null, closeDate: today() }; }
     render();
   })();
