@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>木琴 注文会計</title>
+<style>
+  :root {
+    --paper: #faf8f4;
+    --ink: #1d1b18;
+    --shu: #c73e2e;       /* 朱 = 入力された値・主要アクション */
+    --rule: #d8d4cc;
+    --shade: #efece6;
+    --dim: #8a857c;
+    --ok: #2e6b45;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Noto Serif CJK JP", "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif;
+    background: var(--paper); color: var(--ink);
+    font-size: 16px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+  button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+  input, select { font: inherit; color: inherit; }
+
+  /* ===== app frame ===== */
+  #app { max-width: 760px; margin: 0 auto; min-height: 100%; display: flex; flex-direction: column; }
+  header.bar {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 14px 16px 10px; border-bottom: 1px solid var(--ink);
+  }
+  header.bar h1 { font-size: 20px; font-weight: 700; letter-spacing: 2px; }
+  header.bar .date { color: var(--dim); font-size: 14px; }
+  nav.tabs { display: flex; border-bottom: 1px solid var(--rule); }
+  nav.tabs button {
+    flex: 1; padding: 12px 0; font-size: 16px; font-weight: 700;
+    border-bottom: 3px solid transparent; color: var(--dim);
+  }
+  nav.tabs button.on { color: var(--ink); border-bottom-color: var(--shu); }
+  main { flex: 1; padding: 14px 14px 90px; }
+
+  /* ===== slip list ===== */
+  .newslip {
+    display: block; width: 100%; padding: 14px; margin-bottom: 14px;
+    border: 1px solid var(--ink); background: var(--ink); color: var(--paper);
+    font-size: 17px; font-weight: 700; letter-spacing: 1px;
+  }
+  .sliplist { display: flex; flex-direction: column; gap: 8px; }
+  .slipcard {
+    width: 100%; text-align: left; border: 1px solid var(--rule); background: #fff;
+    padding: 10px 12px; display: flex; align-items: center; gap: 12px;
+  }
+  .slipcard .tno { font-size: 20px; font-weight: 700; min-width: 64px; }
+  .slipcard .meta { flex: 1; font-size: 13px; color: var(--dim); }
+  .slipcard .amt { font-size: 18px; font-weight: 700; }
+  .slipcard.paid { background: var(--shade); }
+  .slipcard.paid .amt { color: var(--dim); }
+  .slipcard .st { font-size: 12px; border: 1px solid currentColor; padding: 1px 6px; }
+  .st.open { color: var(--shu); }
+  .st.paid { color: var(--ok); }
+  .empty { color: var(--dim); text-align: center; padding: 40px 0; }
+
+  /* ===== editor ===== */
+  .ed-top { display: flex; align-items: stretch; gap: 10px; margin-bottom: 12px; }
+  .tablepick { display: flex; align-items: center; border: 1px solid var(--ink); background: #fff; }
+  .tablepick .lbl { padding: 0 10px; font-size: 14px; border-right: 1px solid var(--rule); align-self: stretch; display: flex; align-items: center; background: var(--shade); }
+  .tablepick input {
+    width: 72px; border: none; text-align: center; font-size: 24px; font-weight: 700;
+    color: var(--shu); background: #fff; padding: 8px 0; outline: none;
+  }
+  .ed-top .sp { flex: 1; }
+  .ed-top .back { font-size: 14px; color: var(--dim); padding: 0 6px; }
+
+  section.block { border: 1px solid var(--ink); background: #fff; margin-bottom: 14px; }
+  section.block > h2 {
+    font-size: 15px; font-weight: 700; padding: 7px 12px;
+    background: var(--shade); border-bottom: 1px solid var(--ink);
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  section.block > h2 .note { font-weight: 400; font-size: 12px; color: var(--dim); }
+
+  .stepper { display: flex; align-items: center; }
+  .stepper button {
+    width: 46px; height: 46px; font-size: 24px; line-height: 1;
+    border: 1px solid var(--rule); background: var(--paper);
+  }
+  .stepper button:active { background: var(--shade); }
+  .stepper .val {
+    min-width: 52px; text-align: center; font-size: 24px; font-weight: 700;
+  }
+  .stepper .val.set { color: var(--shu); }
+  .stepper .val.zero { color: var(--rule); font-weight: 400; }
+
+  .courserow { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; }
+  .courserow .nm { font-size: 16px; font-weight: 700; }
+  .courserow .nm small { display: block; font-weight: 400; font-size: 12px; color: var(--dim); }
+
+  /* soba grid */
+  .sobagrid { width: 100%; border-collapse: collapse; }
+  .sobagrid th, .sobagrid td { border-top: 1px solid var(--rule); padding: 0; }
+  .sobagrid th { font-size: 13px; font-weight: 700; padding: 6px 4px; background: #fff; }
+  .sobagrid thead th { border-top: none; border-bottom: 1px solid var(--ink); }
+  .sobagrid .iname { text-align: left; padding: 6px 10px; font-size: 15px; white-space: nowrap; }
+  .sobagrid .iname small { display: block; font-weight: 400; font-size: 11px; color: var(--dim); }
+  .cellbtn {
+    width: 100%; height: 52px; font-size: 22px; font-weight: 700;
+    border-left: 1px solid var(--rule);
+    -webkit-user-select: none; user-select: none; touch-action: manipulation;
+  }
+  .cellbtn.zero { color: var(--rule); font-weight: 400; font-size: 16px; }
+  .cellbtn.set { color: var(--shu); }
+  .cellbtn:active { background: var(--shade); }
+  .modehead button {
+    font-size: 13px; font-weight: 700; padding: 6px 10px; border: 1px solid var(--ink);
+  }
+  .modehead button.on { background: var(--ink); color: var(--paper); }
+
+  /* goods grid */
+  .goods { display: grid; grid-template-columns: 1fr 1fr; }
+  .gitem { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-top: 1px solid var(--rule); gap: 6px; }
+  .gitem:nth-child(-n+2) { border-top: none; }
+  .gitem:nth-child(odd) { border-right: 1px solid var(--rule); }
+  .gitem .nm { font-size: 14px; font-weight: 700; line-height: 1.3; }
+  .gitem .nm small { display: block; font-weight: 400; font-size: 11px; color: var(--dim); }
+  @media (max-width: 560px) {
+    .goods { grid-template-columns: 1fr; }
+    .gitem:nth-child(odd) { border-right: none; }
+    .gitem:nth-child(2) { border-top: 1px solid var(--rule); }
+  }
+
+  .warn {
+    border: 1px solid var(--shu); color: var(--shu); background: #fff;
+    padding: 8px 12px; font-size: 14px; margin-bottom: 12px;
+  }
+
+  /* footer bar in editor */
+  .edfoot {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--paper); border-top: 1px solid var(--ink);
+  }
+  .edfoot .inner { max-width: 760px; margin: 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 14px; }
+  .edfoot .total { flex: 1; font-size: 15px; }
+  .edfoot .total b { font-size: 26px; margin-left: 6px; }
+  .btn {
+    padding: 12px 18px; font-size: 16px; font-weight: 700; border: 1px solid var(--ink);
+    background: #fff;
+  }
+  .btn.primary { background: var(--shu); border-color: var(--shu); color: #fff; }
+  .btn.ghost { color: var(--dim); border-color: var(--rule); }
+  .btn:disabled { opacity: .4; }
+
+  /* ===== pay screen ===== */
+  .billlines { border: 1px solid var(--ink); background: #fff; margin-bottom: 14px; }
+  .billlines .row { display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--rule); font-size: 15px; }
+  .billlines .row:first-child { border-top: none; }
+  .billlines .row .q { color: var(--dim); }
+  .billlines .row.sub { font-size: 13px; color: var(--dim); padding-top: 0; border-top: none; }
+  .billlines .row.total { border-top: 1px solid var(--ink); font-weight: 700; font-size: 18px; }
+  .paymethod { display: flex; gap: 10px; margin-bottom: 14px; }
+  .paymethod button { flex: 1; padding: 14px 0; font-size: 17px; font-weight: 700; border: 1px solid var(--ink); background: #fff; }
+  .paymethod button.on { background: var(--ink); color: var(--paper); }
+  .tender { border: 1px solid var(--ink); background: #fff; padding: 12px; margin-bottom: 14px; }
+  .tender .trow { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .tender input { width: 150px; text-align: right; font-size: 24px; font-weight: 700; color: var(--shu); border: none; border-bottom: 2px solid var(--ink); background: transparent; outline: none; padding: 2px 4px; }
+  .quick { display: flex; gap: 8px; flex-wrap: wrap; }
+  .quick button { padding: 10px 14px; border: 1px solid var(--rule); background: var(--paper); font-weight: 700; }
+  .change { font-size: 17px; display: flex; justify-content: space-between; padding-top: 10px; border-top: 1px solid var(--rule); }
+  .change b { font-size: 26px; }
+  .change.minus b { color: var(--shu); }
+
+  /* ===== closing ===== */
+  .close-sec { border: 1px solid var(--ink); background: #fff; margin-bottom: 14px; }
+  .close-sec h2 { font-size: 15px; font-weight: 700; padding: 7px 12px; background: var(--shade); border-bottom: 1px solid var(--ink); }
+  .kv { display: flex; justify-content: space-between; padding: 8px 12px; border-top: 1px solid var(--rule); font-size: 15px; }
+  .kv:first-of-type { border-top: none; }
+  .kv b { font-size: 18px; }
+  .kv.big b { font-size: 24px; }
+  .kv .warnv { color: var(--shu); }
+  .denoms { padding: 6px 12px 12px; }
+  .denom { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
+  .denom .face { width: 90px; font-size: 15px; }
+  .denom .amt { width: 110px; text-align: right; font-size: 15px; color: var(--dim); }
+  .prep input { width: 130px; text-align: right; font-size: 20px; font-weight: 700; border: none; border-bottom: 2px solid var(--ink); background: transparent; outline: none; color: var(--shu); }
+  .csvbtns { display: flex; gap: 10px; margin: 16px 0 6px; }
+  .csvbtns .btn { flex: 1; }
+  .datepick { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .datepick select { padding: 8px; font-size: 16px; border: 1px solid var(--ink); background: #fff; }
+
+  dialog { border: 1px solid var(--ink); background: var(--paper); padding: 20px; max-width: 90vw; }
+  dialog::backdrop { background: rgba(29,27,24,.45); }
+  dialog p { margin-bottom: 16px; }
+  dialog .dlgbtns { display: flex; gap: 10px; justify-content: flex-end; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="bar">
+    <h1>木琴 注文会計</h1>
+    <span class="date num" id="hdrDate"></span>
+    <span style="flex:1"></span>
+    <button id="btnSettings" style="font-size:13px;color:var(--dim);border:1px solid var(--rule);padding:3px 10px;">設定</button>
+  </header>
+  <nav class="tabs">
+    <button id="tabSlips" class="on">伝票</button>
+    <button id="tabClose">締め</button>
+  </nav>
+  <main id="main"></main>
+</div>
+
+<dialog id="dlg">
+  <p id="dlgMsg"></p>
+  <div class="dlgbtns">
+    <button class="btn ghost" id="dlgNo">やめる</button>
+    <button class="btn primary" id="dlgYes">実行する</button>
+  </div>
+</dialog>
+
+<input type="file" id="camInput" accept="image/*" capture="environment" style="display:none">
+
+<div id="busy" style="display:none;position:fixed;inset:0;background:rgba(250,248,244,.88);z-index:50;align-items:center;justify-content:center;flex-direction:column;gap:12px;">
+  <div style="font-size:20px;font-weight:700;">読み取り中…</div>
+  <div style="color:var(--dim);font-size:14px;">数秒かかります</div>
+</div>
+
+<dialog id="dlgSettings" style="width:min(560px,92vw);">
+  <p style="font-weight:700;margin-bottom:10px;">設定</p>
+  <p style="font-size:14px;margin-bottom:6px;">読み取りサーバーURL(Cloudflare WorkerのURL)</p>
+  <input id="inReader" style="width:100%;border:1px solid var(--ink);background:#fff;padding:8px;font-size:14px;" placeholder="https://kikkin-reader.◯◯◯.workers.dev">
+  <p style="color:var(--dim);font-size:12px;margin:8px 0 14px;">未設定の間は撮影ボタンが使えません。手入力と読み取り貼り付けはいつでも使えます。</p>
+  <div class="dlgbtns">
+    <button class="btn ghost" id="setNo">閉じる</button>
+    <button class="btn primary" id="setYes">保存する</button>
+  </div>
+</dialog>
+
+<dialog id="dlgPaste" style="width:min(640px,92vw);">
+  <p style="font-weight:700;">読み取り結果(JSON)を貼り付け</p>
+  <textarea id="pasteArea" style="width:100%;height:180px;font-family:monospace;font-size:13px;border:1px solid var(--ink);background:#fff;padding:8px;" placeholder='{"卓番号":3,"コースの数":1,"注文":[{"cell":"1b","数":1}]}'></textarea>
+  <p id="pasteErr" style="color:var(--shu);font-size:13px;min-height:1.2em;margin:6px 0 10px;"></p>
+  <div class="dlgbtns">
+    <button class="btn ghost" id="pasteNo">やめる</button>
+    <button class="btn primary" id="pasteYes">伝票にする</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+
+/* ================= メニューマスタ(品書き確定版 2026-10-20・税込) ================= */
+const COURSE_PRICE = 3000;
+const SIZE_UP = { a: 0, b: 400, c: 800, d: 0, e: 400, f: 800 };
+const SIZE_NAME = { a: "普通", b: "大盛", c: "倍盛", d: "普通", e: "大盛", f: "倍盛" };
+const SOBA = [
+  { row: 1, name: "三通り盛り蕎麦", yomi: "みとおりもりそば", temp: "冷", price: 1100, courseDiff: 0 },
+  { row: 2, name: "山かけ蕎麦（冷）", yomi: "", temp: "冷", price: 1450, courseDiff: 350 },
+  { row: 3, name: "釜揚げ蕎麦", yomi: "", temp: "温", price: 1100, courseDiff: 0 },
+  { row: 4, name: "かけ蕎麦", yomi: "", temp: "温", price: 1100, courseDiff: 0 },
+  { row: 5, name: "ニラ蕎麦", yomi: "", temp: "温", price: 1350, courseDiff: 250 },
+  { row: 6, name: "山かけ蕎麦（温）", yomi: "", temp: "温", price: 1450, courseDiff: 350 },
+];
+const GOODS = [
+  { id: "G1", name: "蕎麦炊きご飯", note: "1日5食", price: 1200 },
+  { id: "G2", name: "出汁巻き卵", note: "", price: 800 },
+  { id: "G3", name: "炙り蕎麦がき", note: "", price: 700 },
+  { id: "G4", name: "蕎麦ゼリーぜんざい", note: "", price: 400 },
+  { id: "G5", name: "トッピング 卵", note: "", price: 150 },
+  { id: "G6", name: "缶ビール", note: "お車の確認を", price: 500 },
+  { id: "G7", name: "缶ノンアルコールビール", note: "", price: 400 },
+];
+const QTY_FLAG = 10; // この数以上は確認表示
+
+/* ================= 保存 ================= */
+const STORE_KEY = "kikkin_pos_v1";
+function load() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return { slips: [], seq: 1, prep: {} }; // prep: {date: 釣銭準備金}
+}
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); } catch (e) {}
+}
+let DB = load();
+
+/* ================= ユーティリティ ================= */
+const yen = n => "¥" + n.toLocaleString("ja-JP");
+function today() {
+  const d = new Date();
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+function nowTime() {
+  const d = new Date();
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+/* 伝票の明細行を計算して返す */
+function slipLines(slip) {
+  const lines = [];
+  const course = slip.course || 0;
+  if (course > 0) {
+    lines.push({ name: "木琴蕎麦づくしコース", qty: course, unit: COURSE_PRICE, amt: course * COURSE_PRICE });
+  }
+  for (const s of SOBA) {
+    for (const col of ["a", "b", "c"]) {
+      const q = slip.items[s.row + col] || 0;
+      if (q > 0) {
+        const unit = s.price + SIZE_UP[col];
+        lines.push({ name: s.name + "・" + SIZE_NAME[col], qty: q, unit, amt: q * unit });
+      }
+    }
+    for (const col of ["d", "e", "f"]) {
+      const q = slip.items[s.row + col] || 0;
+      if (q > 0) {
+        const unit = s.courseDiff + SIZE_UP[col];
+        lines.push({ name: "└ コースの蕎麦:" + s.name + "・" + SIZE_NAME[col], qty: q, unit, amt: q * unit, courseSel: true });
+      }
+    }
+  }
+  for (const g of GOODS) {
+    const q = slip.items[g.id] || 0;
+    if (q > 0) lines.push({ name: g.name, qty: q, unit: g.price, amt: q * g.price });
+  }
+  return lines;
+}
+function slipTotal(slip) { return slipLines(slip).reduce((a, l) => a + l.amt, 0); }
+function courseSelCount(slip) {
+  let n = 0;
+  for (const s of SOBA) for (const col of ["d", "e", "f"]) n += slip.items[s.row + col] || 0;
+  return n;
+}
+function slipWarnings(slip) {
+  const w = [];
+  const c = slip.course || 0, sel = courseSelCount(slip);
+  if (c !== sel && (c > 0 || sel > 0)) w.push("コースの数(" + c + ")とコースの蕎麦の合計(" + sel + ")が合いません");
+  if ((slip.items["G6"] || 0) > 0) w.push("缶ビールあり。お車を運転されるか確認を");
+  for (const k in slip.items) if (slip.items[k] >= QTY_FLAG) w.push("数量" + slip.items[k] + "の品があります。数の確認を");
+  return w;
+}
+
+/* ================= 画面状態 ================= */
+let view = { tab: "slips", mode: "list", slipId: null, closeDate: today() };
+
+function findSlip(id) { return DB.slips.find(s => s.id === id); }
+
+function newSlip() {
+  const slip = {
+    id: DB.seq++,
+    date: today(), time: nowTime(),
+    table: "", status: "open",
+    course: 0, items: {},
+    pay: null, tendered: null,
+  };
+  DB.slips.push(slip); save();
+  view = { ...view, mode: "edit", slipId: slip.id };
+  render();
+}
+
+/* ================= 描画 ================= */
+const main = document.getElementById("main");
+
+function render() {
+  document.getElementById("hdrDate").textContent = today();
+  document.getElementById("tabSlips").className = view.tab === "slips" ? "on" : "";
+  document.getElementById("tabClose").className = view.tab === "close" ? "on" : "";
+  if (view.tab === "close") { renderClose(); return; }
+  if (view.mode === "edit") { renderEditor(); return; }
+  if (view.mode === "pay") { renderPay(); return; }
+  renderList();
+}
+
+/* ---- 伝票一覧 ---- */
+function renderList() {
+  const slips = DB.slips.filter(s => s.date === today() && s.status !== "void").sort((a, b) => b.id - a.id);
+  let h = '<button class="newslip" id="btnShot" style="background:var(--shu);border:1px solid var(--shu);">📷 注文票を撮影して読み取り</button>' +
+    '<div style="display:flex;gap:8px;margin-bottom:14px;">' +
+    '<button class="newslip" id="btnNew" style="margin-bottom:0;flex:1.3;">＋ 新規伝票(手入力)</button>' +
+    '<button class="newslip" id="btnPaste" style="margin-bottom:0;flex:1;background:#fff;color:var(--ink);font-size:15px;white-space:nowrap;padding:14px 8px;">読み取り貼り付け</button>' +
+    '</div><div class="sliplist">';
+  if (!slips.length) h += '<div class="empty">本日の伝票はまだありません</div>';
+  for (const s of slips) {
+    const t = slipTotal(s);
+    h += '<button class="slipcard ' + (s.status === "paid" ? "paid" : "") + '" data-id="' + s.id + '">' +
+      '<span class="tno num">卓 ' + esc(s.table || "−") + '</span>' +
+      '<span class="meta num">#' + s.id + "　" + s.time + (s.pay ? "　" + s.pay : "") + "</span>" +
+      '<span class="st ' + s.status + '">' + (s.status === "paid" ? "会計済" : "未会計") + "</span>" +
+      '<span class="amt num">' + yen(t) + "</span></button>";
+  }
+  h += "</div>";
+  main.innerHTML = h;
+  document.getElementById("btnNew").onclick = newSlip;
+  document.getElementById("btnPaste").onclick = openPaste;
+  document.getElementById("btnShot").onclick = startShot;
+  main.querySelectorAll(".slipcard").forEach(el => el.onclick = () => {
+    view = { ...view, mode: "edit", slipId: Number(el.dataset.id) };
+    render();
+  });
+}
+
+/* ---- 伝票エディタ(紙の注文票と同じ並び) ---- */
+function renderEditor() {
+  const slip = findSlip(view.slipId);
+  if (!slip) { view.mode = "list"; renderList(); return; }
+  const paid = slip.status === "paid";
+  const warns = slipWarnings(slip);
+
+  let h = '<div class="ed-top">' +
+    '<button class="back" id="btnBack">◀ 一覧</button>' +
+    '<div class="tablepick"><span class="lbl">卓番号</span><input id="inTable" class="num" inputmode="numeric" value="' + esc(slip.table) + '"' + (paid ? " disabled" : "") + "></div>" +
+    '<div class="sp"></div>' +
+    '<span class="meta num" style="color:var(--dim);font-size:13px;align-self:center;">#' + slip.id + "　" + slip.time + "</span>" +
+    "</div>";
+
+  for (const w of warns) h += '<div class="warn">' + esc(w) + "</div>";
+  if (slip.readFlags) for (const w of slip.readFlags) h += '<div class="warn">' + esc(w) + "</div>";
+
+  /* コース */
+  h += '<section class="block"><h2>木琴蕎麦づくしコース <span class="note">' + yen(COURSE_PRICE) + '・蕎麦はコースの蕎麦欄で</span></h2>' +
+    '<div class="courserow"><div class="nm">コースの数</div>' + stepper("C", slip.course, paid) + "</div></section>";
+
+  /* 蕎麦グリッド */
+  h += '<section class="block"><h2>蕎　麦 <span class="note">タップ＋1・長押し−1(大盛+400 倍盛+800)</span></h2>' +
+    '<table class="sobagrid"><thead><tr><th class="iname"></th>' +
+    '<th colspan="3">単　品</th><th colspan="3" style="border-left:1px solid var(--ink);">コースの蕎麦</th></tr>' +
+    '<tr><th class="iname"></th><th>普通</th><th>大盛</th><th>倍盛</th>' +
+    '<th style="border-left:1px solid var(--ink);">普通</th><th>大盛</th><th>倍盛</th></tr></thead><tbody>';
+  for (const s of SOBA) {
+    h += '<tr><td class="iname">' + esc(s.name) + (s.yomi ? "<small>" + s.yomi + "</small>" : "") + "</td>";
+    for (const col of ["a", "b", "c", "d", "e", "f"]) {
+      const key = s.row + col;
+      const q = slip.items[key] || 0;
+      const style = col === "d" ? ' style="border-left:1px solid var(--ink);"' : "";
+      h += "<td" + style + '><button class="cellbtn num ' + (q ? "set" : "zero") + '" data-cell="' + key + '"' + (paid ? " disabled" : "") + ">" + (q || "＋") + "</button></td>";
+    }
+    h += "</tr>";
+  }
+  h += "</tbody></table></section>";
+
+  /* 一品 */
+  h += '<section class="block"><h2>一品・トッピング・飲み物</h2><div class="goods">';
+  for (const g of GOODS) {
+    h += '<div class="gitem"><div class="nm">' + esc(g.name) + "<small>" + yen(g.price) + (g.note ? "・" + esc(g.note) : "") + "</small></div>" + stepper(g.id, slip.items[g.id] || 0, paid) + "</div>";
+  }
+  h += "</div></section>";
+
+  /* フッター */
+  const total = slipTotal(slip);
+  h += '<div class="edfoot"><div class="inner">' +
+    '<div class="total">合計<b class="num">' + yen(total) + "</b></div>";
+  if (paid) {
+    h += '<button class="btn ghost" id="btnUnpay">会計取消</button>';
+  } else {
+    h += '<button class="btn ghost" id="btnVoid">伝票削除</button>' +
+      '<button class="btn primary" id="btnPay"' + (total > 0 ? "" : " disabled") + ">会計へ</button>";
+  }
+  h += "</div></div>";
+
+  main.innerHTML = h;
+
+  document.getElementById("btnBack").onclick = () => { view.mode = "list"; render(); };
+  const inTable = document.getElementById("inTable");
+  if (inTable && !paid) inTable.oninput = () => { slip.table = inTable.value.trim(); save(); };
+
+  if (!paid) {
+    main.querySelectorAll("[data-cell]").forEach(el => {
+      let timer = null, longFired = false;
+      const start = () => {
+        longFired = false;
+        timer = setTimeout(() => {
+          longFired = true;
+          if (navigator.vibrate) navigator.vibrate(30);
+          bump(slip, el.dataset.cell, -1);
+        }, 500);
+      };
+      const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+      el.addEventListener("pointerdown", start);
+      el.addEventListener("pointerup", cancel);
+      el.addEventListener("pointerleave", cancel);
+      el.addEventListener("pointercancel", cancel);
+      el.onclick = () => { if (longFired) { longFired = false; return; } bump(slip, el.dataset.cell, +1); };
+      el.oncontextmenu = ev => ev.preventDefault();
+    });
+    main.querySelectorAll("[data-step]").forEach(el => {
+      el.onclick = () => bump(slip, el.dataset.step, Number(el.dataset.dir));
+    });
+    const bv = document.getElementById("btnVoid");
+    if (bv) bv.onclick = () => confirmDlg("この伝票を削除しますか?", () => {
+      slip.status = "void"; save(); view.mode = "list"; render();
+    });
+    const bp = document.getElementById("btnPay");
+    if (bp) bp.onclick = () => { view.mode = "pay"; render(); };
+  } else {
+    document.getElementById("btnUnpay").onclick = () => confirmDlg("会計を取り消して未会計に戻しますか?", () => {
+      slip.status = "open"; slip.pay = null; slip.tendered = null; save(); render();
+    });
+  }
+}
+
+function stepper(key, val, disabled) {
+  return '<div class="stepper">' +
+    '<button data-step="' + key + '" data-dir="-1"' + (disabled ? " disabled" : "") + ">−</button>" +
+    '<span class="val num ' + (val ? "set" : "zero") + '">' + val + "</span>" +
+    '<button data-step="' + key + '" data-dir="1"' + (disabled ? " disabled" : "") + ">＋</button></div>";
+}
+
+function bump(slip, key, dir) {
+  if (key === "C") {
+    slip.course = Math.max(0, (slip.course || 0) + dir);
+  } else {
+    const q = Math.max(0, (slip.items[key] || 0) + dir);
+    if (q === 0) delete slip.items[key]; else slip.items[key] = q;
+  }
+  save(); render();
+}
+
+/* ---- 会計 ---- */
+function renderPay() {
+  const slip = findSlip(view.slipId);
+  if (!slip) { view.mode = "list"; renderList(); return; }
+  const lines = slipLines(slip);
+  const total = slipTotal(slip);
+  if (!slip.payTmp) slip.payTmp = "現金";
+
+  let h = '<div class="ed-top"><button class="back" id="btnBack">◀ 伝票に戻る</button>' +
+    '<div class="sp"></div><span style="font-size:15px;align-self:center;">卓 <b class="num">' + esc(slip.table || "−") + "</b>　#" + slip.id + "</span></div>";
+
+  h += '<div class="billlines">';
+  for (const l of lines) {
+    h += '<div class="row"><span>' + esc(l.name) + ' <span class="q num">×' + l.qty + "</span></span><span class=\"num\">" + yen(l.amt) + "</span></div>";
+  }
+  h += '<div class="row total"><span>合計</span><span class="num">' + yen(total) + "</span></div></div>";
+
+  h += '<div class="paymethod">' +
+    '<button id="pmCash" class="' + (slip.payTmp === "現金" ? "on" : "") + '">現金</button>' +
+    '<button id="pmQR" class="' + (slip.payTmp === "QR" ? "on" : "") + '">QR決済</button></div>';
+
+  if (slip.payTmp === "現金") {
+    const t = slip.tendered == null ? "" : slip.tendered;
+    const change = t === "" ? null : Number(t) - total;
+    h += '<div class="tender"><div class="trow"><span>お預かり</span><input id="inTender" class="num" inputmode="numeric" value="' + t + '" placeholder="0"></div>' +
+      '<div class="quick">' +
+      '<button data-t="' + total + '">ちょうど</button>' +
+      '<button data-t="' + Math.ceil(total / 1000) * 1000 + '">' + yen(Math.ceil(total / 1000) * 1000) + "</button>" +
+      '<button data-t="' + Math.ceil(total / 5000) * 5000 + '">' + yen(Math.ceil(total / 5000) * 5000) + "</button>" +
+      '<button data-t="' + Math.ceil(total / 10000) * 10000 + '">' + yen(Math.ceil(total / 10000) * 10000) + "</button>" +
+      "</div>" +
+      (change == null ? "" :
+        '<div class="change ' + (change < 0 ? "minus" : "") + '"><span>お釣り</span><b class="num">' + (change < 0 ? "不足 " + yen(-change) : yen(change)) + "</b></div>") +
+      "</div>";
+  }
+
+  const canPay = slip.payTmp === "QR" || (slip.tendered != null && Number(slip.tendered) >= total);
+  h += '<div class="edfoot"><div class="inner"><div class="total">合計<b class="num">' + yen(total) + "</b></div>" +
+    '<button class="btn primary" id="btnDone"' + (canPay ? "" : " disabled") + ">会計完了</button></div></div>";
+
+  main.innerHTML = h;
+  document.getElementById("btnBack").onclick = () => { view.mode = "edit"; render(); };
+  document.getElementById("pmCash").onclick = () => { slip.payTmp = "現金"; render(); };
+  document.getElementById("pmQR").onclick = () => { slip.payTmp = "QR"; slip.tendered = null; render(); };
+  const it = document.getElementById("inTender");
+  if (it) {
+    it.onchange = () => { slip.tendered = it.value === "" ? null : Number(it.value.replace(/[^0-9]/g, "")) || 0; render(); };
+    main.querySelectorAll("[data-t]").forEach(el => el.onclick = () => { slip.tendered = Number(el.dataset.t); render(); });
+  }
+  const bd = document.getElementById("btnDone");
+  if (bd) bd.onclick = () => {
+    if (bd.disabled) return;
+    slip.status = "paid"; slip.pay = slip.payTmp; delete slip.payTmp;
+    slip.paidAt = nowTime(); save();
+    view.mode = "list"; render();
+  };
+}
+
+/* ---- 締め ---- */
+function renderClose() {
+  const dates = [...new Set(DB.slips.filter(s => s.status !== "void").map(s => s.date))].sort().reverse();
+  if (!dates.includes(view.closeDate)) view.closeDate = dates[0] || today();
+  const D = view.closeDate;
+  const slips = DB.slips.filter(s => s.date === D && s.status !== "void");
+  const paidSlips = slips.filter(s => s.status === "paid");
+  const openSlips = slips.filter(s => s.status === "open");
+  const cash = paidSlips.filter(s => s.pay === "現金").reduce((a, s) => a + slipTotal(s), 0);
+  const qr = paidSlips.filter(s => s.pay === "QR").reduce((a, s) => a + slipTotal(s), 0);
+  const sales = cash + qr;
+
+  /* 出数集計 */
+  const counts = {};
+  for (const s of paidSlips) {
+    if (s.course) counts["木琴蕎麦づくしコース"] = (counts["木琴蕎麦づくしコース"] || 0) + s.course;
+    for (const l of slipLines(s)) if (!l.name.startsWith("木琴蕎麦づくしコース")) counts[l.name] = (counts[l.name] || 0) + l.qty;
+  }
+
+  const prep = DB.prep[D] || 0;
+  const DENOMS = [10000, 5000, 1000, 500, 100, 50, 10, 5, 1];
+  if (!DB.denoms) DB.denoms = {};
+  const dn = DB.denoms[D] || {};
+  const counted = DENOMS.reduce((a, f) => a + f * (dn[f] || 0), 0);
+  const theory = prep + cash;
+  const diff = counted - theory;
+
+  let h = '<div class="datepick"><span>対象日</span><select id="selDate">';
+  const opts = dates.length ? dates : [today()];
+  for (const d of opts) h += '<option value="' + d + '"' + (d === D ? " selected" : "") + ">" + d + "</option>";
+  h += "</select></div>";
+
+  h += '<div class="close-sec"><h2>売上(' + D + ')</h2>' +
+    '<div class="kv big"><span>売上合計(会計済 ' + paidSlips.length + '件)</span><b class="num">' + yen(sales) + "</b></div>" +
+    '<div class="kv"><span>現金</span><b class="num">' + yen(cash) + "</b></div>" +
+    '<div class="kv"><span>QR決済</span><b class="num">' + yen(qr) + "</b></div>" +
+    (openSlips.length ? '<div class="kv"><span class="warnv">未会計の伝票</span><b class="warnv num">' + openSlips.length + "件</b></div>" : "") +
+    "</div>";
+
+  h += '<div class="close-sec"><h2>現金締め</h2>' +
+    '<div class="kv prep"><span>釣銭準備金</span><span><input id="inPrep" class="num" inputmode="numeric" value="' + (prep || "") + '" placeholder="0"> 円</span></div>' +
+    '<div class="denoms">';
+  for (const f of DENOMS) {
+    const c = dn[f] || 0;
+    h += '<div class="denom"><span class="face num">' + f.toLocaleString() + "円</span>" +
+      '<div class="stepper"><button data-dn="' + f + '" data-dir="-1">−</button><span class="val num ' + (c ? "set" : "zero") + '">' + c + '</span><button data-dn="' + f + '" data-dir="1">＋</button></div>' +
+      '<span class="amt num">' + yen(f * c) + "</span></div>";
+  }
+  h += "</div>" +
+    '<div class="kv"><span>実査計(レジ内の現金)</span><b class="num">' + yen(counted) + "</b></div>" +
+    '<div class="kv"><span>理論在高(準備金+現金売上)</span><b class="num">' + yen(theory) + "</b></div>" +
+    '<div class="kv big"><span>差額</span><b class="num' + (diff !== 0 ? " warnv" : "") + '">' + (diff > 0 ? "+" : "") + yen(diff).replace("¥-", "−¥") + "</b></div></div>";
+
+  h += '<div class="close-sec"><h2>出数</h2>';
+  const keys = Object.keys(counts);
+  if (!keys.length) h += '<div class="kv"><span style="color:var(--dim)">会計済の伝票がありません</span><b></b></div>';
+  for (const k of keys) h += '<div class="kv"><span>' + esc(k) + '</span><b class="num">' + counts[k] + "</b></div>";
+  h += "</div>";
+
+  h += '<div class="csvbtns"><button class="btn" id="btnCsv">明細CSVを保存</button><button class="btn" id="btnCsvSum">日計CSVを保存</button></div>' +
+    '<p style="color:var(--dim);font-size:13px;">CSVはこの端末のダウンロードに保存されます。Excelでそのまま開けます。</p>';
+
+  main.innerHTML = h;
+  document.getElementById("selDate").onchange = e => { view.closeDate = e.target.value; render(); };
+  document.getElementById("inPrep").onchange = e => {
+    DB.prep[D] = Number(e.target.value.replace(/[^0-9]/g, "")) || 0; save(); render();
+  };
+  main.querySelectorAll("[data-dn]").forEach(el => el.onclick = () => {
+    const f = el.dataset.dn;
+    if (!DB.denoms[D]) DB.denoms[D] = {};
+    DB.denoms[D][f] = Math.max(0, (DB.denoms[D][f] || 0) + Number(el.dataset.dir));
+    save(); render();
+  });
+  document.getElementById("btnCsv").onclick = () => downloadCsv(D, slips);
+  document.getElementById("btnCsvSum").onclick = () => downloadDaily(D, sales, cash, qr, counts, prep, counted, diff);
+}
+
+/* ---- CSV ---- */
+function csvCell(v) { v = String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+function downloadFile(name, text) {
+  const blob = new Blob(["﻿" + text], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+function downloadCsv(D, slips) {
+  const rows = [["日付", "伝票ID", "時刻", "卓番号", "状態", "支払方法", "品目", "数量", "単価", "金額"]];
+  for (const s of slips.sort((a, b) => a.id - b.id)) {
+    for (const l of slipLines(s)) {
+      rows.push([s.date, s.id, s.time, s.table, s.status === "paid" ? "会計済" : "未会計", s.pay || "", l.name, l.qty, l.unit, l.amt]);
+    }
+  }
+  downloadFile("木琴_明細_" + D + ".csv", rows.map(r => r.map(csvCell).join(",")).join("\n"));
+}
+function downloadDaily(D, sales, cash, qr, counts, prep, counted, diff) {
+  const rows = [["日付", D], ["売上合計", sales], ["現金売上", cash], ["QR売上", qr],
+    ["釣銭準備金", prep], ["実査計", counted], ["差額", diff], [], ["品目", "出数"]];
+  for (const k in counts) rows.push([k, counts[k]]);
+  downloadFile("木琴_日計_" + D + ".csv", rows.map(r => r.map(csvCell).join(",")).join("\n"));
+}
+
+/* ---- 確認ダイアログ ---- */
+const dlg = document.getElementById("dlg");
+function confirmDlg(msg, fn) {
+  document.getElementById("dlgMsg").textContent = msg;
+  dlg.showModal();
+  document.getElementById("dlgYes").onclick = () => { dlg.close(); fn(); };
+  document.getElementById("dlgNo").onclick = () => dlg.close();
+}
+
+/* ---- 読み取り結果の取り込み ---- */
+const VALID_CELLS = (() => {
+  const set = new Set();
+  for (let r = 1; r <= 6; r++) for (const c of "abcdef") set.add(r + c);
+  for (const g of GOODS) set.add(g.id);
+  return set;
+})();
+function importJson(text) {
+  let data;
+  try { data = JSON.parse(text); } catch (e) { throw new Error("JSONとして読めません: " + e.message); }
+  const slip = {
+    id: DB.seq++, date: today(), time: nowTime(),
+    table: "", status: "open", course: 0, items: {}, pay: null, tendered: null,
+  };
+  const t = data["卓番号"] ?? data.table ?? data.T;
+  if (t != null) slip.table = String(typeof t === "object" ? (t["値"] ?? "") : t);
+  let c = data["コースの数"] ?? data.course ?? data.C ?? 0;
+  if (typeof c === "object" && c) c = c["値"] ?? 0;
+  slip.course = Math.max(0, Number(c) || 0);
+  const bad = [];
+  const put = (cell, qty) => {
+    cell = String(cell).trim();
+    qty = Number(qty) || 0;
+    if (!VALID_CELLS.has(cell)) { bad.push(cell); return; }
+    if (qty > 0) slip.items[cell] = (slip.items[cell] || 0) + qty;
+  };
+  if (Array.isArray(data["注文"])) for (const l of data["注文"]) put(l.cell, l["数"] ?? l.qty);
+  else if (Array.isArray(data.items)) for (const l of data.items) put(l.cell, l["数"] ?? l.qty);
+  else if (data.items && typeof data.items === "object") for (const k in data.items) put(k, data.items[k]);
+  if (bad.length) throw new Error("不明なセル番地: " + bad.join(", "));
+  if (!slip.course && !Object.keys(slip.items).length) throw new Error("注文の中身が見つかりません");
+  DB.slips.push(slip); save();
+  return slip;
+}
+const dlgPaste = document.getElementById("dlgPaste");
+function openPaste() {
+  document.getElementById("pasteArea").value = "";
+  document.getElementById("pasteErr").textContent = "";
+  dlgPaste.showModal();
+}
+document.getElementById("pasteNo").onclick = () => dlgPaste.close();
+document.getElementById("pasteYes").onclick = () => {
+  try {
+    const slip = importJson(document.getElementById("pasteArea").value);
+    dlgPaste.close();
+    view = { ...view, tab: "slips", mode: "edit", slipId: slip.id };
+    render();
+  } catch (e) {
+    document.getElementById("pasteErr").textContent = e.message;
+  }
+};
+
+/* ---- 設定(読み取りサーバー) ---- */
+const CFG_KEY = "kikkin_pos_cfg_v1";
+function loadCfg() {
+  try { return JSON.parse(localStorage.getItem(CFG_KEY)) || {}; } catch (e) { return {}; }
+}
+function saveCfg(c) { try { localStorage.setItem(CFG_KEY, JSON.stringify(c)); } catch (e) {} }
+const dlgSettings = document.getElementById("dlgSettings");
+document.getElementById("btnSettings").onclick = openSettings;
+function openSettings() {
+  document.getElementById("inReader").value = loadCfg().readerUrl || "";
+  dlgSettings.showModal();
+}
+document.getElementById("setNo").onclick = () => dlgSettings.close();
+document.getElementById("setYes").onclick = () => {
+  const c = loadCfg();
+  c.readerUrl = document.getElementById("inReader").value.trim();
+  saveCfg(c); dlgSettings.close(); render();
+};
+
+/* ---- 撮影して読み取り ---- */
+const camInput = document.getElementById("camInput");
+const busy = document.getElementById("busy");
+function startShot() {
+  if (!loadCfg().readerUrl) { openSettings(); return; }
+  camInput.value = "";
+  camInput.click();
+}
+camInput.addEventListener("change", async () => {
+  const file = camInput.files && camInput.files[0];
+  if (!file) return;
+  busy.style.display = "flex";
+  try {
+    const b64 = await shrinkToBase64(file, 1600, 0.85);
+    const res = await fetch(loadCfg().readerUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: b64, media_type: "image/jpeg" }),
+    });
+    const out = await res.json();
+    if (!out.ok) throw new Error(out.error || "読み取りに失敗しました");
+    const slip = importJson(JSON.stringify(out.data));
+    if (Array.isArray(out.data.flags) && out.data.flags.length) {
+      slip.readFlags = out.data.flags.map(f => "読み取り要確認 " + (f.cell || "") + ": " + (f["理由"] || f.reason || ""));
+      save();
+    }
+    view = { ...view, tab: "slips", mode: "edit", slipId: slip.id };
+    render();
+  } catch (e) {
+    alert("読み取りできませんでした:\n" + e.message + "\n\n手入力か「読み取り貼り付け」をお使いください。");
+  } finally {
+    busy.style.display = "none";
+  }
+});
+
+/* 画像を縮小してbase64(JPEG)にする */
+function shrinkToBase64(file, maxSide, quality) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      try {
+        const r = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const w = Math.round(img.width * r), h = Math.round(img.height * r);
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        cv.getContext("2d").drawImage(img, 0, 0, w, h);
+        const dataUrl = cv.toDataURL("image/jpeg", quality);
+        URL.revokeObjectURL(url);
+        resolve(dataUrl.split(",")[1]);
+      } catch (e) { reject(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("画像を開けません")); };
+    img.src = url;
+  });
+}
+
+/* ---- タブ ---- */
+document.getElementById("tabSlips").onclick = () => { view.tab = "slips"; view.mode = "list"; render(); };
+document.getElementById("tabClose").onclick = () => { view.tab = "close"; render(); };
+
+render();
+
+/* ================= QA用シナリオ(?qa=1) ================= */
+if (location.search.includes("qa=")) {
+  (function qa() {
+    localStorage.removeItem(STORE_KEY);
+    DB = load();
+    // 伝票1: 検証済みサンプル(卓3)
+    const s1 = { id: DB.seq++, date: today(), time: "11:15", table: "3", status: "open", course: 1,
+      items: { "1b": 1, "2e": 1, "G2": 1, "G6": 1 }, pay: null, tendered: null };
+    DB.slips.push(s1);
+    s1.status = "paid"; s1.pay = "現金"; s1.tendered = 7000; s1.paidAt = "11:40";
+    // 伝票2: 意地悪テスト相当
+    const s2 = { id: DB.seq++, date: today(), time: "11:22", table: "5", status: "open", course: 2,
+      items: { "1b": 1, "2f": 2, "3c": 14, "5a": 2, "G2": 3, "G6": 1 }, pay: null, tendered: null };
+    DB.slips.push(s2);
+    // 伝票3: 未会計
+    DB.slips.push({ id: DB.seq++, date: today(), time: "12:01", table: "1", status: "open", course: 0,
+      items: { "4a": 2, "G4": 2 }, pay: null, tendered: null });
+    DB.prep[today()] = 20000;
+    DB.denoms = {}; DB.denoms[today()] = { "5000": 1, "1000": 1, "500": 1, "100": 1 };
+    save();
+    const q = new URLSearchParams(location.search).get("qa");
+    if (q === "edit") { view = { tab: "slips", mode: "edit", slipId: s2.id, closeDate: today() }; }
+    else if (q === "pay") { s2.payTmp = "現金"; s2.tendered = 50000; view = { tab: "slips", mode: "pay", slipId: s2.id, closeDate: today() }; }
+    else if (q === "close") { view = { tab: "close", mode: "list", slipId: null, closeDate: today() }; }
+    else { view = { tab: "slips", mode: "list", slipId: null, closeDate: today() }; }
+    render();
+  })();
+}
+</script>
+</body>
+</html>
