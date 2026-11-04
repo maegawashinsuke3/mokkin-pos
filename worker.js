@@ -183,7 +183,6 @@ export default {
         body: JSON.stringify({
           model,
           max_tokens: 1500,
-          temperature: 0,
           system: "あなたは注文票読み取り係。応答は必ず指定のJSONオブジェクト1個のみ。それ以外の文字を出力してはならない。",
           messages: [{
             role: "user",

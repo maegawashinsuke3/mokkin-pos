@@ -302,6 +302,14 @@ const RETAIL = [
   // 委託品の追加例: { id: "B11", name: "〇〇さんの品", price: 1000, stock: [], consignor: "〇〇さん", feeRate: 0.10 },
 ];
 
+/* 画面から追加した物販品(DB.retailCustomに保存・共有台帳で同期)。retired=trueは販売終了(履歴には残る) */
+function allRetail() { return RETAIL.concat(DB.retailCustom || []); }
+function activeRetail() { return allRetail().filter(r => !r.retired); }
+function nextRetailId() {
+  const nums = allRetail().map(r => Number(String(r.id).slice(1))).filter(n => !isNaN(n));
+  return "B" + (Math.max(100, ...nums) + 1);
+}
+
 const QTY_FLAG = 10; // この数以上は確認表示
 
 /* ===== 在庫マスタ =====
@@ -349,12 +357,12 @@ function slipConsumption(slip) {
   const c = {};
   const add = (id, q) => { c[id] = (c[id] || 0) + q; };
   for (const [id, q] of COURSE_RECIPE) add(id, q * (slip.course || 0));
-  const RETAIL_BY_ID = slipConsumption._r || (slipConsumption._r = Object.fromEntries(RETAIL.map(r => [r.id, r])));
+  const RETAIL_BY_ID = Object.fromEntries(allRetail().map(r => [r.id, r]));
   for (const key in slip.items) {
     const qty = slip.items[key];
     if (/^B\d+$/.test(key)) {
       const r = RETAIL_BY_ID[key];
-      if (r) for (const [id, q] of r.stock) add(id, q * qty);
+      if (r) for (const [id, q] of (r.stock || [])) add(id, q * qty);
     } else if (/^G\d$/.test(key)) {
       for (const [id, q] of (GOODS_RECIPE[key] || [])) add(id, q * qty);
     } else {
@@ -421,8 +429,8 @@ function menuRemaining(dateStr) {
   let mc = Infinity;
   for (const [id, q] of COURSE_RECIPE) mc = Math.min(mc, bal[id] / q);
   res["C"] = Math.max(0, Math.floor(mc));
-  for (const r of RETAIL) {
-    if (!r.stock.length) { res[r.id] = Infinity; continue; }
+  for (const r of allRetail()) {
+    if (!(r.stock || []).length) { res[r.id] = Infinity; continue; }
     let m = Infinity;
     for (const [id, q] of r.stock) m = Math.min(m, bal[id] / q);
     res[r.id] = Math.max(0, Math.floor(m));
@@ -514,10 +522,11 @@ async function fetchState() {
     const out = await api("/state", "GET");
     DB.slips = out.slips || [];
     DB.intake = out.intake || [];
-    DB.prep = {}; DB.denoms = {};
+    DB.prep = {}; DB.denoms = {}; DB.retailCustom = [];
     for (const k in (out.meta || {})) {
       if (k.startsWith("prep:")) DB.prep[k.slice(5)] = Number(out.meta[k]) || 0;
       if (k.startsWith("denoms:")) { try { DB.denoms[k.slice(7)] = JSON.parse(out.meta[k]); } catch (e) {} }
+      if (k === "retail_custom") { try { DB.retailCustom = JSON.parse(out.meta[k]) || []; } catch (e) {} }
     }
     save();
     setSync(true);
@@ -566,7 +575,7 @@ function slipLines(slip) {
     const q = slip.items[g.id] || 0;
     if (q > 0) lines.push({ name: g.name, qty: q, unit: g.price, amt: q * g.price });
   }
-  for (const r of RETAIL) {
+  for (const r of allRetail()) {
     const q = slip.items[r.id] || 0;
     if (q > 0) lines.push({ name: "物販 " + r.name, qty: q, unit: r.price, amt: q * r.price, retail: true });
   }
@@ -739,7 +748,7 @@ function renderEditor() {
 
   /* 物販 */
   h += '<section class="block"><h2>物販(レジ横)</h2><div class="goods">';
-  for (const r of RETAIL) {
+  for (const r of activeRetail()) {
     h += '<div class="gitem"><div class="nm">' + esc(r.name) + (res => res === Infinity ? "" : zanTag(res))(rem[r.id]) + "<small>" + yen(r.price) + (r.consignor ? "・委託:" + esc(r.consignor) : "") + (r.supplier ? "・仕入:" + esc(r.supplier) : "") + "</small></div>" + stepper(r.id, slip.items[r.id] || 0, paid) + "</div>";
   }
   h += "</div></section>";
@@ -949,7 +958,7 @@ function renderClose() {
   /* 委託販売の月次精算 */
   {
     const months = consignMonths();
-    const hasConsignItems = RETAIL.some(r => r.consignor || r.supplier);
+    const hasConsignItems = allRetail().some(r => r.consignor || r.supplier);
     if (hasConsignItems) {
       if (!view.consignYm || !months.includes(view.consignYm)) view.consignYm = months[0] || D.slice(0, 7);
       const YM = view.consignYm;
@@ -1078,7 +1087,7 @@ function consignMonths() {
   const set = new Set();
   for (const s of DB.slips) {
     if (s.status !== "paid") continue;
-    for (const r of RETAIL) if ((r.consignor || r.supplier) && (s.items[r.id] || 0) > 0) { set.add(s.date.slice(0, 7)); break; }
+    for (const r of allRetail()) if ((r.consignor || r.supplier) && (s.items[r.id] || 0) > 0) { set.add(s.date.slice(0, 7)); break; }
   }
   return [...set].sort().reverse();
 }
@@ -1086,7 +1095,7 @@ function monthlyConsignment(ym) {
   const rows = {};
   for (const s of DB.slips) {
     if (s.status !== "paid" || !s.date.startsWith(ym)) continue;
-    for (const r of RETAIL) {
+    for (const r of allRetail()) {
       if (!r.consignor) continue;
       const q = s.items[r.id] || 0;
       if (!q) continue;
@@ -1102,7 +1111,7 @@ function monthlyPurchased(ym) {
   const rows = {};
   for (const s of DB.slips) {
     if (s.status !== "paid" || !s.date.startsWith(ym)) continue;
-    for (const r of RETAIL) {
+    for (const r of allRetail()) {
       if (!r.supplier) continue;
       const q = s.items[r.id] || 0;
       if (!q) continue;
@@ -1210,7 +1219,7 @@ function renderStock() {
     const n = rem[g.id];
     h += '<div class="kv"><span>' + esc(g.name) + '</span><b class="num' + (n <= 0 ? " warnv" : "") + '">' + n + "</b></div>";
   }
-  for (const r of RETAIL) {
+  for (const r of allRetail()) {
     const n = rem[r.id];
     if (n === Infinity) continue;
     h += '<div class="kv"><span>物販 ' + esc(r.name) + '</span><b class="num' + (n <= 0 ? " warnv" : "") + '">' + n + "</b></div>";
@@ -1227,6 +1236,31 @@ function renderStock() {
     '<button class="btn primary" id="btnIntake">追加</button></div>' +
     '<p style="color:var(--dim);font-size:12px;margin-top:8px;">毎朝仕込みの品は当日限り(翌日に持ち越しません)。繰越の品は残がそのまま明日に続きます。温かい蕎麦は温用麺から先に減り、尽きると細打ち麺から減ります(平日は温用麺0のままでOK)。</p>' +
     "</div></div>";
+
+  /* 物販の品目管理 */
+  h += '<div class="close-sec"><h2>物販の品を管理</h2><div style="padding:10px 12px;">' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+    '<input id="rNew" placeholder="品名" style="flex:2;min-width:140px;padding:10px;font-size:16px;border:1px solid var(--ink);background:#fff;">' +
+    '<input id="rPrice" class="num" inputmode="numeric" placeholder="価格(円)" style="flex:1;min-width:90px;padding:10px;font-size:16px;border:1px solid var(--ink);background:#fff;text-align:right;"></div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center;">' +
+    '<select id="rKind" style="padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;">' +
+    '<option value="own">自社品</option><option value="consign">委託(手数料をもらう)</option><option value="supply">仕入(買取済み)</option></select>' +
+    '<input id="rPartner" placeholder="相手の名前" style="flex:1;min-width:110px;padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;">' +
+    '<input id="rRate" class="num" inputmode="numeric" placeholder="率%" style="width:70px;padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;text-align:right;">' +
+    '<button class="btn primary" id="btnRetailAdd">追加</button></div>' +
+    '<p style="color:var(--dim);font-size:12px;margin-top:8px;">率%は、委託=手数料率(例10)、仕入=仕入掛率(例60=6掛け)。自社品は相手と率は空欄のまま。追加した品は全端末の物販に即反映されます。在庫数の管理が必要な品は開発側で追加するので相談してください。</p>' +
+    "</div>";
+  const customs = DB.retailCustom || [];
+  if (customs.length) {
+    for (const r of customs) {
+      h += '<div class="kv"><span>' + esc(r.name) + ' <span style="color:var(--dim);font-size:12px;">' + yen(r.price) +
+        (r.consignor ? "・委託:" + esc(r.consignor) + "(" + Math.round((r.feeRate ?? 0.1) * 100) + "%)" : "") +
+        (r.supplier ? "・仕入:" + esc(r.supplier) + "(" + Math.round((r.costRate ?? 0.6) * 100) + "%)" : "") +
+        (r.retired ? "・販売終了" : "") + "</span></span>" +
+        '<button data-retire="' + r.id + '" style="color:var(--shu);border:1px solid var(--rule);padding:2px 8px;font-size:12px;">' + (r.retired ? "販売再開" : "販売終了") + "</button></div>";
+    }
+  }
+  h += "</div>";
 
   h += '<div class="close-sec"><h2>本日の入庫記録</h2>';
   if (!intakeToday.length) h += '<div class="kv"><span style="color:var(--dim)">まだありません</span><b></b></div>';
@@ -1247,6 +1281,28 @@ function renderStock() {
     DB.intake.push(rec);
     save(); queueOp("/intake", { rec }); render();
   };
+  const bra = document.getElementById("btnRetailAdd");
+  if (bra) bra.onclick = () => {
+    const name = document.getElementById("rNew").value.trim();
+    const price = Number(document.getElementById("rPrice").value.replace(/[^0-9]/g, ""));
+    const kind = document.getElementById("rKind").value;
+    const partner = document.getElementById("rPartner").value.trim();
+    const rate = Number(document.getElementById("rRate").value.replace(/[^0-9.]/g, ""));
+    if (!name || !price) { alert("品名と価格を入れてください"); return; }
+    if (kind !== "own" && !partner) { alert("委託・仕入の品は相手の名前を入れてください"); return; }
+    const item = { id: nextRetailId(), name, price, stock: [] };
+    if (kind === "consign") { item.consignor = partner; item.feeRate = (rate || 10) / 100; }
+    if (kind === "supply") { item.supplier = partner; item.costRate = (rate || 60) / 100; }
+    if (!DB.retailCustom) DB.retailCustom = [];
+    DB.retailCustom.push(item);
+    save(); queueOp("/meta", { k: "retail_custom", v: JSON.stringify(DB.retailCustom) }); render();
+  };
+  main.querySelectorAll("[data-retire]").forEach(el => el.onclick = () => {
+    const r = (DB.retailCustom || []).find(x => x.id === el.dataset.retire);
+    if (!r) return;
+    r.retired = !r.retired;
+    save(); queueOp("/meta", { k: "retail_custom", v: JSON.stringify(DB.retailCustom) }); render();
+  });
   main.querySelectorAll("[data-rmintake]").forEach(el => el.onclick = () => {
     DB.intake = DB.intake.filter(r => String(r.ts) !== el.dataset.rmintake);
     save(); queueOp("/intake/delete", { ts: el.dataset.rmintake }); render();
