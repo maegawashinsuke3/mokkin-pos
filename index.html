@@ -247,7 +247,7 @@
   <input id="inAppKey" style="width:100%;border:1px solid var(--ink);background:#fff;padding:8px;font-size:14px;" placeholder="設定した場合のみ">
   <p style="font-size:14px;margin:10px 0 6px;">アプリのパスワード(英数字4〜12文字・空にすればロックなし)</p>
   <input id="inPin" autocomplete="off" style="width:100%;border:1px solid var(--ink);background:#fff;padding:8px;font-size:14px;" placeholder="例: mokkin">
-  <p style="color:var(--dim);font-size:12px;margin:8px 0 14px;">パスワードは端末を覗かれないための鍵です。変更も解除もこの欄でいつでもできます。忘れた場合はブラウザのサイトデータ消去でリセット(共有台帳があれば伝票は再取得されます)。</p>
+  <p style="color:var(--dim);font-size:12px;margin:8px 0 14px;">パスワードは1日1回、その日最初に開いた時だけ聞かれます。変更も解除もこの欄でいつでもできます。忘れた場合はブラウザのサイトデータ消去でリセット(共有台帳があれば伝票は再取得されます)。</p>
   <div class="dlgbtns">
     <button class="btn ghost" id="setNo">閉じる</button>
     <button class="btn primary" id="setYes">保存する</button>
@@ -290,11 +290,16 @@ const GOODS = [
 ];
 /* ===== 物販マスタ =====
    行を足せば伝票・会計・出数・CSVに自動で反映される。
-   stock: 消費する在庫品目(なければ空配列=在庫管理外) */
+   stock: 消費する在庫品目(なければ空配列=在庫管理外)
+   consignor: 委託元の名前+feeRate: 手数料率(省略時0.10)=委託品(売上-手数料を相手に支払う)。
+   supplier: 仕入先の名前+costRate: 仕入掛率(例0.6=6掛け)=仕入品(買取済・精算不要、月次で粗利を表示)。
+   どちらも書かなければ自社品。月次集計は締めタブの「物販の月次精算」 */
 const RETAIL = [
   { id: "B1", name: "木琴の味(瓶)", price: 700, stock: [["S_BIN", 1]] },
   { id: "B2", name: "村の卵(1個)", price: 100, stock: [["S_EGG_PKG", 1]] },
-  // 追加例: { id: "B3", name: "蕎麦茶(1パック)", price: 300, stock: [["S_CHA", 1]] },
+  { id: "B10", name: "かまどはん", price: 11880, stock: [], supplier: "閑心窯", costRate: 0.6 }, // 仕入品・定価11,880円。掛率0.6は記憶ベースの仮値──閑心窯の請求書/納品書で確認し、違えばこの数字だけ直す(会計金額には影響しない。月次の粗利表示のみに効く)
+  // 自社品の追加例: { id: "B3", name: "蕎麦茶(1パック)", price: 300, stock: [["S_CHA", 1]] },
+  // 委託品の追加例: { id: "B11", name: "〇〇さんの品", price: 1000, stock: [], consignor: "〇〇さん", feeRate: 0.10 },
 ];
 
 const QTY_FLAG = 10; // この数以上は確認表示
@@ -597,7 +602,7 @@ function newSlip() {
   const slip = {
     id: genId(),
     date: today(), time: nowTime(),
-    table: "", status: "open",
+    table: "", status: "open", people: 0,
     course: 0, items: {},
     pay: null, tendered: null,
   };
@@ -647,6 +652,22 @@ function renderList() {
       '<span class="amt num">' + yen(t) + "</span></button>";
   }
   h += "</div>";
+
+  /* 過去の未会計(前日以前の消し忘れ・テスト伝票など) */
+  const pastOpen = DB.slips.filter(s => s.date < today() && s.status === "open").sort((a, b) => b.id - a.id);
+  if (pastOpen.length) {
+    h += '<div style="margin-top:18px;font-size:14px;font-weight:700;color:var(--shu);">過去の未会計(開いて「伝票削除」か「会計へ」で整理してください)</div>';
+    h += '<div class="sliplist" style="margin-top:8px;">';
+    for (const s of pastOpen) {
+      h += '<button class="slipcard" data-id="' + s.id + '">' +
+        '<span class="tno num">卓 ' + esc(s.table || "−") + '</span>' +
+        '<span class="meta num">' + s.date + "　" + s.time + "</span>" +
+        '<span class="st open">未会計</span>' +
+        '<span class="amt num">' + yen(slipTotal(s)) + "</span></button>";
+    }
+    h += "</div>";
+  }
+
   main.innerHTML = h;
   document.getElementById("btnNew").onclick = newSlip;
   document.getElementById("btnPaste").onclick = openPaste;
@@ -668,12 +689,22 @@ function renderEditor() {
   let h = '<div class="ed-top">' +
     '<button class="back" id="btnBack">◀ 一覧</button>' +
     '<div class="tablepick"><span class="lbl">卓番号</span><input id="inTable" class="num" inputmode="numeric" value="' + esc(slip.table) + '"' + (paid ? " disabled" : "") + "></div>" +
+    '<div class="tablepick" style="margin-left:8px;"><span class="lbl">人数</span><input id="inPeople" class="num" inputmode="numeric" style="width:56px;" value="' + (slip.people || "") + '"' + (paid ? " disabled" : "") + ' placeholder="−"></div>' +
     '<div class="sp"></div>' +
     '<span class="meta num" style="color:var(--dim);font-size:13px;align-self:center;">#' + shortId(slip.id) + "　" + slip.time + "</span>" +
     "</div>";
 
   for (const w of warns) h += '<div class="warn">' + esc(w) + "</div>";
   if (slip.readFlags) for (const w of slip.readFlags) h += '<div class="warn">' + esc(w) + "</div>";
+  if (!paid) h += '<button class="newslip" id="btnAddShot" style="background:#fff;color:var(--ink);border:1px solid var(--ink);font-size:15px;padding:10px;">📷 追加注文の紙を読み取り(この伝票に追記)</button>';
+  if (slip.photos && slip.photos.length) {
+    const c0 = loadCfg();
+    const base = (c0.readerUrl || "").replace(/\/+$/, "");
+    h += '<div style="font-size:12px;color:var(--dim);margin:-6px 0 12px;">保存写真: ' +
+      slip.photos.map((k, i) => base
+        ? '<a href="' + esc(base + "/photo?key=" + encodeURIComponent(k) + (c0.appKey ? "&k=" + encodeURIComponent(c0.appKey) : "")) + '" target="_blank" style="color:var(--shu);">[' + (i + 1) + "]</a>"
+        : "[" + (i + 1) + "]").join(" ") + "</div>";
+  }
 
   const rem = menuRemaining(slip.date);
 
@@ -709,7 +740,7 @@ function renderEditor() {
   /* 物販 */
   h += '<section class="block"><h2>物販(レジ横)</h2><div class="goods">';
   for (const r of RETAIL) {
-    h += '<div class="gitem"><div class="nm">' + esc(r.name) + (res => res === Infinity ? "" : zanTag(res))(rem[r.id]) + "<small>" + yen(r.price) + "</small></div>" + stepper(r.id, slip.items[r.id] || 0, paid) + "</div>";
+    h += '<div class="gitem"><div class="nm">' + esc(r.name) + (res => res === Infinity ? "" : zanTag(res))(rem[r.id]) + "<small>" + yen(r.price) + (r.consignor ? "・委託:" + esc(r.consignor) : "") + (r.supplier ? "・仕入:" + esc(r.supplier) : "") + "</small></div>" + stepper(r.id, slip.items[r.id] || 0, paid) + "</div>";
   }
   h += "</div></section>";
 
@@ -728,8 +759,12 @@ function renderEditor() {
   main.innerHTML = h;
 
   document.getElementById("btnBack").onclick = () => { view.mode = "list"; render(); };
+  const bas = document.getElementById("btnAddShot");
+  if (bas) bas.onclick = () => startAddShot(slip.id);
   const inTable = document.getElementById("inTable");
   if (inTable && !paid) inTable.oninput = () => { slip.table = inTable.value.trim(); save(); schedulePushSlip(slip); };
+  const inPeople = document.getElementById("inPeople");
+  if (inPeople && !paid) inPeople.oninput = () => { slip.people = Math.max(0, Number(inPeople.value.replace(/[^0-9]/g, "")) || 0); save(); schedulePushSlip(slip); };
 
   if (!paid) {
     main.querySelectorAll("[data-cell]").forEach(el => {
@@ -810,9 +845,11 @@ function renderPay() {
     h += '<div class="tender"><div class="trow"><span>お預かり</span><input id="inTender" class="num" inputmode="numeric" value="' + t + '" placeholder="0"></div>' +
       '<div class="quick">' +
       '<button data-t="' + total + '">ちょうど</button>' +
-      '<button data-t="' + Math.ceil(total / 1000) * 1000 + '">' + yen(Math.ceil(total / 1000) * 1000) + "</button>" +
-      '<button data-t="' + Math.ceil(total / 5000) * 5000 + '">' + yen(Math.ceil(total / 5000) * 5000) + "</button>" +
-      '<button data-t="' + Math.ceil(total / 10000) * 10000 + '">' + yen(Math.ceil(total / 10000) * 10000) + "</button>" +
+      (() => {
+        const cands = [100, 500, 1000, 5000, 10000].map(u => Math.ceil(total / u) * u);
+        const uniq = [...new Set(cands)].filter(v => v !== total).sort((a, b) => a - b);
+        return uniq.map(v => '<button data-t="' + v + '">' + yen(v) + "</button>").join("");
+      })() +
       "</div>" +
       (change == null ? "" :
         '<div class="change ' + (change < 0 ? "minus" : "") + '"><span>お釣り</span><b class="num">' + (change < 0 ? "不足 " + yen(-change) : yen(change)) + "</b></div>") +
@@ -876,6 +913,13 @@ function renderClose() {
 
   h += '<div class="close-sec"><h2>売上(' + D + ')</h2>' +
     '<div class="kv big"><span>売上合計(会計済 ' + paidSlips.length + '件)</span><b class="num">' + yen(sales) + "</b></div>" +
+    (() => {
+      const guests = paidSlips.reduce((a, s2) => a + (s2.people || 0), 0);
+      const noPeople = paidSlips.filter(s2 => !s2.people).length;
+      let hh = '<div class="kv"><span>客数(人数記入分)</span><b class="num">' + guests + "人" + (noPeople ? '<span style="font-weight:400;color:var(--dim);font-size:12px;">　未記入' + noPeople + "組</span>" : "") + "</b></div>";
+      hh += '<div class="kv"><span>客単価</span><b class="num">' + (guests > 0 ? yen(Math.round(sales / guests)) : "−") + "</b></div>";
+      return hh;
+    })() +
     '<div class="kv"><span>うち物販</span><b class="num">' + yen(paidSlips.reduce((a, s2) => a + slipRetailTotal(s2), 0)) + "</b></div>" +
     '<div class="kv"><span>現金</span><b class="num">' + yen(cash) + "</b></div>" +
     '<div class="kv"><span>QR決済</span><b class="num">' + yen(qr) + "</b></div>" +
@@ -902,6 +946,67 @@ function renderClose() {
   for (const k of keys) h += '<div class="kv"><span>' + esc(k) + '</span><b class="num">' + counts[k] + "</b></div>";
   h += "</div>";
 
+  /* 委託販売の月次精算 */
+  {
+    const months = consignMonths();
+    const hasConsignItems = RETAIL.some(r => r.consignor || r.supplier);
+    if (hasConsignItems) {
+      if (!view.consignYm || !months.includes(view.consignYm)) view.consignYm = months[0] || D.slice(0, 7);
+      const YM = view.consignYm;
+      h += '<div class="close-sec"><h2>物販の月次精算(委託・仕入)</h2>';
+      h += '<div class="kv"><span>対象月</span><span><select id="selYm" style="padding:6px;font-size:15px;border:1px solid var(--ink);background:#fff;">';
+      const opts = months.length ? months : [D.slice(0, 7)];
+      for (const m of opts) h += '<option value="' + m + '"' + (m === YM ? " selected" : "") + ">" + m + "</option>";
+      h += "</select></span></div>";
+      const list = monthlyConsignment(YM);
+      const pur = monthlyPurchased(YM);
+      if (!list.length && !pur.length) h += '<div class="kv"><span style="color:var(--dim)">この月の委託品・仕入品の販売はありません</span><b></b></div>';
+      let tSales = 0, tFee = 0;
+      for (const r of list) {
+        const fee = Math.round(r.sales * r.rate);
+        tSales += r.sales; tFee += fee;
+        h += '<div class="kv"><span>委託　' + esc(r.consignor) + "　" + esc(r.name) + ' <span style="color:var(--dim);font-size:12px;">×' + r.qty + "・手数料" + (r.rate * 100) + "%</span></span>" +
+          '<b class="num">' + yen(r.sales) + ' <span style="font-weight:400;color:var(--dim);font-size:12px;">手数料' + yen(fee) + "/支払" + yen(r.sales - fee) + "</span></b></div>";
+      }
+      if (list.length) {
+        h += '<div class="kv big"><span>委託合計(売上/手数料/支払)</span><b class="num">' + yen(tSales) + " / " + yen(tFee) + " / " + yen(tSales - tFee) + "</b></div>";
+      }
+      for (const r of pur) {
+        const cost = Math.round(r.sales * r.costRate);
+        h += '<div class="kv"><span>仕入　' + esc(r.supplier) + "　" + esc(r.name) + ' <span style="color:var(--dim);font-size:12px;">×' + r.qty + "・" + (r.costRate * 10) + "掛</span></span>" +
+          '<b class="num">' + yen(r.sales) + ' <span style="font-weight:400;color:var(--dim);font-size:12px;">粗利' + yen(r.sales - cost) + "</span></b></div>";
+      }
+      if (list.length || pur.length) {
+        h += '<div style="padding:6px 12px 12px;"><button class="btn" id="btnCsvConsign" style="width:100%;">精算書CSVを保存(' + YM + ")</button></div>";
+      }
+      h += "</div>";
+    }
+  }
+
+  /* 月次・年次の集計 */
+  {
+    if (!view.aggUnit) view.aggUnit = "m";
+    const periods = periodsFor(view.aggUnit);
+    if (!view.aggKey || !periods.includes(view.aggKey)) view.aggKey = periods[0] || (view.aggUnit === "y" ? D.slice(0, 4) : D.slice(0, 7));
+    const A = aggregatePeriod(view.aggKey);
+    h += '<div class="close-sec"><h2>月次・年次の集計</h2>';
+    h += '<div class="kv"><span>期間</span><span>' +
+      '<select id="selAggUnit" style="padding:6px;font-size:15px;border:1px solid var(--ink);background:#fff;margin-right:6px;">' +
+      '<option value="m"' + (view.aggUnit === "m" ? " selected" : "") + '>月</option>' +
+      '<option value="y"' + (view.aggUnit === "y" ? " selected" : "") + '>年</option></select>' +
+      '<select id="selAggKey" style="padding:6px;font-size:15px;border:1px solid var(--ink);background:#fff;">';
+    const plist = periods.length ? periods : [view.aggKey];
+    for (const p of plist) h += '<option value="' + p + '"' + (p === view.aggKey ? " selected" : "") + ">" + p + "</option>";
+    h += '</select></span></div>';
+    h += '<div class="kv big"><span>売上合計(' + A.days + '営業日・' + A.slips + '伝票)</span><b class="num">' + yen(A.sales) + "</b></div>";
+    h += '<div class="kv"><span>現金 / QR</span><b class="num">' + yen(A.cash) + " / " + yen(A.qr) + "</b></div>";
+    h += '<div class="kv"><span>うち物販</span><b class="num">' + yen(A.retail) + "</b></div>";
+    h += '<div class="kv"><span>客数・客単価(人数記入分)</span><b class="num">' + A.guests + "人・" + (A.guests > 0 ? yen(Math.round(A.sales / A.guests)) : "−") + "</b></div>";
+    h += '<div class="kv"><span>日平均売上</span><b class="num">' + (A.days > 0 ? yen(Math.round(A.sales / A.days)) : "−") + "</b></div>";
+    h += '<div style="padding:6px 12px 12px;"><button class="btn" id="btnCsvPeriod" style="width:100%;">' + (view.aggUnit === "y" ? "年計" : "月計") + "CSVを保存(" + view.aggKey + ")</button></div>";
+    h += "</div>";
+  }
+
   h += '<div class="csvbtns"><button class="btn" id="btnCsv">明細CSVを保存</button><button class="btn" id="btnCsvSum">日計CSVを保存</button></div>' +
     '<p style="color:var(--dim);font-size:13px;">CSVはこの端末のダウンロードに保存されます。Excelでそのまま開けます。</p>';
 
@@ -920,8 +1025,119 @@ function renderClose() {
     schedulePushMeta("denoms:" + D, () => JSON.stringify(DB.denoms[D] || {}));
     render();
   });
+  const sau = document.getElementById("selAggUnit");
+  if (sau) sau.onchange = e => { view.aggUnit = e.target.value; view.aggKey = null; render(); };
+  const sak = document.getElementById("selAggKey");
+  if (sak) sak.onchange = e => { view.aggKey = e.target.value; render(); };
+  const bcp = document.getElementById("btnCsvPeriod");
+  if (bcp) bcp.onclick = () => downloadPeriod(view.aggKey);
+  const selYm = document.getElementById("selYm");
+  if (selYm) selYm.onchange = e => { view.consignYm = e.target.value; render(); };
+  const bcc = document.getElementById("btnCsvConsign");
+  if (bcc) bcc.onclick = () => downloadConsign(view.consignYm);
   document.getElementById("btnCsv").onclick = () => downloadCsv(D, slips);
   document.getElementById("btnCsvSum").onclick = () => downloadDaily(D, sales, cash, qr, counts, prep, counted, diff);
+}
+
+/* ---- 期間集計(月次・年次) ---- */
+function periodsFor(unit) { // "m"=月 "y"=年
+  const set = new Set();
+  for (const s of DB.slips) if (s.status === "paid") set.add(unit === "y" ? s.date.slice(0, 4) : s.date.slice(0, 7));
+  return [...set].sort().reverse();
+}
+function aggregatePeriod(prefix) {
+  const paid = DB.slips.filter(s => s.status === "paid" && s.date.startsWith(prefix));
+  const days = new Set(paid.map(s => s.date));
+  let sales = 0, cash = 0, qr = 0, retail = 0, guests = 0;
+  const counts = {};
+  for (const s of paid) {
+    const t = slipTotal(s);
+    sales += t;
+    if (s.pay === "現金") cash += t; else if (s.pay === "QR") qr += t;
+    retail += slipRetailTotal(s);
+    guests += s.people || 0;
+    if (s.course) counts["木琴蕎麦づくしコース"] = (counts["木琴蕎麦づくしコース"] || 0) + s.course;
+    for (const l of slipLines(s)) if (!l.name.startsWith("木琴蕎麦づくしコース")) counts[l.name] = (counts[l.name] || 0) + l.qty;
+  }
+  return { slips: paid.length, days: days.size, sales, cash, qr, retail, guests, counts };
+}
+function downloadPeriod(prefix) {
+  const a = aggregatePeriod(prefix);
+  const rows = [["対象期間", prefix], ["営業日数(会計のあった日)", a.days], ["伝票数", a.slips],
+    ["売上合計", a.sales], ["現金", a.cash], ["QR", a.qr], ["うち物販", a.retail],
+    ["客数(人数記入分)", a.guests], ["客単価", a.guests > 0 ? Math.round(a.sales / a.guests) : ""],
+    ["日平均売上", a.days > 0 ? Math.round(a.sales / a.days) : ""],
+    [], ["品目", "出数"]];
+  for (const k in a.counts) rows.push([k, a.counts[k]]);
+  const label = prefix.length === 4 ? "年計" : "月計";
+  downloadFile("木琴_" + label + "_" + prefix + ".csv", rows.map(r => r.map(csvCell).join(",")).join("\n"));
+}
+
+/* ---- 委託販売の月次精算 ---- */
+function consignMonths() {
+  const set = new Set();
+  for (const s of DB.slips) {
+    if (s.status !== "paid") continue;
+    for (const r of RETAIL) if ((r.consignor || r.supplier) && (s.items[r.id] || 0) > 0) { set.add(s.date.slice(0, 7)); break; }
+  }
+  return [...set].sort().reverse();
+}
+function monthlyConsignment(ym) {
+  const rows = {};
+  for (const s of DB.slips) {
+    if (s.status !== "paid" || !s.date.startsWith(ym)) continue;
+    for (const r of RETAIL) {
+      if (!r.consignor) continue;
+      const q = s.items[r.id] || 0;
+      if (!q) continue;
+      const k = r.consignor + "|" + r.id;
+      if (!rows[k]) rows[k] = { consignor: r.consignor, name: r.name, price: r.price, rate: r.feeRate == null ? 0.10 : r.feeRate, qty: 0, sales: 0 };
+      rows[k].qty += q;
+      rows[k].sales += q * r.price;
+    }
+  }
+  return Object.values(rows).sort((a, b) => a.consignor.localeCompare(b.consignor, "ja"));
+}
+function monthlyPurchased(ym) {
+  const rows = {};
+  for (const s of DB.slips) {
+    if (s.status !== "paid" || !s.date.startsWith(ym)) continue;
+    for (const r of RETAIL) {
+      if (!r.supplier) continue;
+      const q = s.items[r.id] || 0;
+      if (!q) continue;
+      const k = r.supplier + "|" + r.id;
+      if (!rows[k]) rows[k] = { supplier: r.supplier, name: r.name, price: r.price, costRate: r.costRate == null ? 1 : r.costRate, qty: 0, sales: 0 };
+      rows[k].qty += q;
+      rows[k].sales += q * r.price;
+    }
+  }
+  return Object.values(rows).sort((a, b) => a.supplier.localeCompare(b.supplier, "ja"));
+}
+function downloadConsign(ym) {
+  const list = monthlyConsignment(ym);
+  const rows = [["対象月", ym], [], ["委託元", "品名", "単価", "数量", "売上", "手数料率", "販売手数料", "差引支払額"]];
+  const byC = {};
+  for (const r of list) {
+    const fee = Math.round(r.sales * r.rate);
+    rows.push([r.consignor, r.name, r.price, r.qty, r.sales, (r.rate * 100) + "%", fee, r.sales - fee]);
+    if (!byC[r.consignor]) byC[r.consignor] = { sales: 0, fee: 0 };
+    byC[r.consignor].sales += r.sales; byC[r.consignor].fee += fee;
+  }
+  rows.push([]);
+  rows.push(["委託元合計", "", "", "", "売上", "", "手数料", "支払額"]);
+  for (const c in byC) rows.push([c, "", "", "", byC[c].sales, "", byC[c].fee, byC[c].sales - byC[c].fee]);
+  const pur = monthlyPurchased(ym);
+  if (pur.length) {
+    rows.push([]);
+    rows.push(["仕入品の販売(買取済・精算不要)"]);
+    rows.push(["仕入先", "品名", "定価", "数量", "売上", "仕入掛率", "仕入原価", "粗利"]);
+    for (const r of pur) {
+      const cost = Math.round(r.sales * r.costRate);
+      rows.push([r.supplier, r.name, r.price, r.qty, r.sales, (r.costRate * 100) + "%", cost, r.sales - cost]);
+    }
+  }
+  downloadFile("木琴_物販精算_" + ym + ".csv", rows.map(r => r.map(csvCell).join(",")).join("\n"));
 }
 
 /* ---- CSV ---- */
@@ -934,16 +1150,18 @@ function downloadFile(name, text) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
 }
 function downloadCsv(D, slips) {
-  const rows = [["日付", "伝票ID", "時刻", "卓番号", "状態", "支払方法", "品目", "数量", "単価", "金額"]];
+  const rows = [["日付", "伝票ID", "時刻", "卓番号", "人数", "状態", "支払方法", "品目", "数量", "単価", "金額", "写真"]];
   for (const s of slips.sort((a, b) => a.id - b.id)) {
     for (const l of slipLines(s)) {
-      rows.push([s.date, s.id, s.time, s.table, s.status === "paid" ? "会計済" : "未会計", s.pay || "", l.name, l.qty, l.unit, l.amt]);
+      rows.push([s.date, s.id, s.time, s.table, s.people || "", s.status === "paid" ? "会計済" : "未会計", s.pay || "", l.name, l.qty, l.unit, l.amt, (s.photos || []).join(" ")]);
     }
   }
   downloadFile("木琴_明細_" + D + ".csv", rows.map(r => r.map(csvCell).join(",")).join("\n"));
 }
 function downloadDaily(D, sales, cash, qr, counts, prep, counted, diff) {
+  const guests = DB.slips.filter(s2 => s2.date === D && s2.status === "paid").reduce((a, s2) => a + (s2.people || 0), 0);
   const rows = [["日付", D], ["売上合計", sales], ["現金売上", cash], ["QR売上", qr],
+    ["客数(人数記入分)", guests], ["客単価", guests > 0 ? Math.round(sales / guests) : ""],
     ["釣銭準備金", prep], ["実査計", counted], ["差額", diff], [], ["品目", "出数"]];
   for (const k in counts) rows.push([k, counts[k]]);
   rows.push([]);
@@ -1051,6 +1269,9 @@ function importJson(text) {
   };
   const t = data["卓番号"] ?? data.table ?? data.T;
   if (t != null) slip.table = String(typeof t === "object" ? (t["値"] ?? "") : t);
+  let p = data["人数"] ?? data.people ?? data.N;
+  if (p != null && typeof p === "object") p = p["値"];
+  slip.people = Math.max(0, Number(p) || 0);
   let c = data["コースの数"] ?? data.course ?? data.C ?? 0;
   if (typeof c === "object" && c) c = c["値"] ?? 0;
   slip.course = Math.max(0, Number(c) || 0);
@@ -1119,15 +1340,42 @@ document.getElementById("setYes").onclick = () => {
 const camInput = document.getElementById("camInput");
 const libInput = document.getElementById("libInput");
 const busy = document.getElementById("busy");
+let mergeTarget = null; // 追加読み取りの合算先伝票ID
 function startShot() {
   if (!loadCfg().readerUrl) { openSettings(); return; }
+  mergeTarget = null;
   camInput.value = "";
   camInput.click();
 }
 function startLib() {
   if (!loadCfg().readerUrl) { openSettings(); return; }
+  mergeTarget = null;
   libInput.value = "";
   libInput.click();
+}
+function startAddShot(slipId) {
+  if (!loadCfg().readerUrl) { openSettings(); return; }
+  mergeTarget = slipId;
+  camInput.value = "";
+  camInput.click();
+}
+/* 追加読み取り: 既存伝票に合算(数量加算・写真とflagsを追記) */
+function mergeIntoSlip(slip, data, photoKey) {
+  if (!slip.table) { const t = data["卓番号"]; if (t != null) slip.table = String(typeof t === "object" ? (t["値"] ?? "") : t); }
+  if (!slip.people) { let p = data["人数"]; if (p != null && typeof p === "object") p = p["値"]; if (p != null) slip.people = Math.max(0, Number(p) || 0); }
+  slip.course = (slip.course || 0) + Math.max(0, Number(data["コースの数"]) || 0);
+  const bad = [];
+  if (Array.isArray(data["注文"])) for (const l of data["注文"]) {
+    const cell = String(l.cell || "").trim();
+    const q = Number(l["数"] ?? l.qty) || 0;
+    if (!VALID_CELLS.has(cell)) { if (cell) bad.push(cell); continue; }
+    if (q > 0) slip.items[cell] = (slip.items[cell] || 0) + q;
+  }
+  if (photoKey) (slip.photos = slip.photos || []).push(photoKey);
+  const fl = Array.isArray(data.flags) ? data.flags.map(f => "追加読み取り要確認 " + (f.cell || "") + ": " + (f["理由"] || f.reason || "")) : [];
+  if (bad.length) fl.push("追加読み取り: 不明なセル " + bad.join(","));
+  if (fl.length) slip.readFlags = (slip.readFlags || []).concat(fl);
+  save(); pushSlipNow(slip);
 }
 camInput.addEventListener("change", () => readShot(camInput));
 libInput.addEventListener("change", () => readShot(libInput));
@@ -1147,14 +1395,24 @@ async function readShot(inputEl) {
     });
     const out = await res.json();
     if (!out.ok) throw new Error(out.error || "読み取りに失敗しました");
-    const slip = importJson(JSON.stringify(out.data));
-    if (Array.isArray(out.data.flags) && out.data.flags.length) {
-      slip.readFlags = out.data.flags.map(f => "読み取り要確認 " + (f.cell || "") + ": " + (f["理由"] || f.reason || ""));
-      save();
+    const tgt = mergeTarget ? findSlip(mergeTarget) : null;
+    mergeTarget = null;
+    if (tgt && tgt.status === "open") {
+      mergeIntoSlip(tgt, out.data, out.photoKey || null);
+      view = { ...view, tab: "slips", mode: "edit", slipId: tgt.id };
+      render();
+    } else {
+      const slip = importJson(JSON.stringify(out.data));
+      if (out.photoKey) slip.photos = [out.photoKey];
+      if (Array.isArray(out.data.flags) && out.data.flags.length) {
+        slip.readFlags = out.data.flags.map(f => "読み取り要確認 " + (f.cell || "") + ": " + (f["理由"] || f.reason || ""));
+      }
+      save(); pushSlipNow(slip);
+      view = { ...view, tab: "slips", mode: "edit", slipId: slip.id };
+      render();
     }
-    view = { ...view, tab: "slips", mode: "edit", slipId: slip.id };
-    render();
   } catch (e) {
+    mergeTarget = null;
     alert("読み取りできませんでした:\n" + e.message + "\n\n手入力か「読み取り貼り付け」をお使いください。");
   } finally {
     busy.style.display = "none";
@@ -1192,14 +1450,14 @@ document.getElementById("tabClose").onclick = () => { view.tab = "close"; render
 (function initLock() {
   const pin = loadCfg().pin;
   let unlocked = false;
-  try { unlocked = sessionStorage.getItem("kikkin_unlocked") === "1"; } catch (e) {}
+  try { unlocked = localStorage.getItem("kikkin_unlock_day") === today(); } catch (e) {}
   if (!pin || unlocked) return;
   const lock = document.getElementById("lock");
   lock.style.display = "flex";
   const inp = document.getElementById("lockPin");
   const tryOpen = () => {
     if (inp.value === pin) {
-      try { sessionStorage.setItem("kikkin_unlocked", "1"); } catch (e) {}
+      try { localStorage.setItem("kikkin_unlock_day", today()); } catch (e) {}
       lock.style.display = "none";
     } else {
       document.getElementById("lockErr").textContent = "違います";

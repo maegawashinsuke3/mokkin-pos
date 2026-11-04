@@ -26,6 +26,14 @@
    - Variable name: `DB`(この名前どおりに) / D1 database: mokkin-pos-db → 保存(Deploy)
 3. これだけで、同じ読み取りサーバーURLを設定した全端末が同じ台帳を共有します。アプリ右上に「共有✓」と出れば接続OK
 
+## 写真の自動保管(ペーパーレス保存)
+
+1. Cloudflare左メニュー「Storage & Databases」→「R2 object storage」→「Create bucket」→ 名前 `mokkin-photos` で作成(初回はR2の有効化でカード登録を求められることがあります。無料枠10GB内なら請求は発生しません)
+2. Worker(mokkin-reader)の「Settings」→「Bindings」→「Add」→「R2 bucket」
+   - Variable name: `PHOTOS`(この名前どおりに) / Bucket: mokkin-photos → Deploy
+3. 以後、読み取った注文票の写真が日付つきで自動保存され、伝票画面の「保存写真」リンクから開けます。追加注文は伝票画面の「📷 追加注文の紙を読み取り」で読むと、同じ伝票に合算+写真も保存されます
+4. 税務用のペーパーレス保存(スキャナ保存)として使う場合は、運用方式を税理士か税務署に一度確認してください
+
 ## 合言葉(サーバーの不正利用防止・推奨)
 
 1. Workerの「Settings」→「Variables and Secrets」→「Add」

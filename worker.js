@@ -9,6 +9,11 @@
  *   APP_KEY (Secret) を設定すると、アプリの「読み取りの合言葉」と一致しない呼び出しを拒否する。
  * MODEL を変えたい場合は変数 MODEL を追加(省略時 claude-haiku-5-5)。
  *
+ * ===== 写真保管(R2) =====
+ * Settings → Bindings → Add → R2 bucket で変数名 PHOTOS にバケットを紐付けると、
+ * 読み取った注文票の写真を自動保存する(電子帳簿保存の原始記録)。
+ * GET /photo?key=...(&k=合言葉) で画像を取得。
+ *
  * ===== 共有台帳(D1) =====
  * Settings → Bindings → Add → D1 database で変数名 DB にデータベースを紐付けると、
  * 複数端末で同じ伝票・在庫を共有できる。テーブルは初回アクセス時に自動作成。
@@ -24,7 +29,7 @@ const READ_PROMPT = `あなたは手書き注文票の読み取り係です。�
 用紙の仕様:
 - 四隅に黒い角マーク。右下だけ白抜き(向きの判定に使う)
 - 各記入マスの隅に薄いグレーの番地が印刷されている:
-  - T=卓番号、C=コースの数
+  - T=卓番号、N=人数(その卓の客の人数)、C=コースの数
   - 蕎麦の表: 行1〜6 × 列a〜f。行: 1=三通り盛り蕎麦 2=山かけ蕎麦(冷) 3=釜揚げ蕎麦 4=かけ蕎麦 5=ニラ蕎麦 6=山かけ蕎麦(温)。列: a/b/c=単品の普通/大盛/倍盛、d/e/f=コースの蕎麦の普通/大盛/倍盛
   - 一品: G1=蕎麦炊きご飯 G2=出汁巻き卵 G3=炙り蕎麦がき G4=蕎麦ゼリーぜんざい G5=トッピング卵 G6=缶ビール G7=缶ノンアルコールビール
 - 手書きは赤ペンが原則(黒や青で書かれていても読む)
@@ -37,8 +42,13 @@ const READ_PROMPT = `あなたは手書き注文票の読み取り係です。�
 5. 読みに確信が持てないマス、枠外記入、二重訂正のあったマスは flags に理由付きで挙げる
 6. 印刷された数字(記入例の2と1など)は手書きではないので無視する
 
-出力は次のJSONだけを返す。説明文・コードブロック記号は一切付けない:
-{"卓番号": 数値またはnull, "コースの数": 数値, "注文": [{"cell": "番地", "数": 数値}], "flags": [{"cell": "番地", "理由": "短い説明"}]}
+出力規則(最重要):
+- どんな場合でも、応答は次のJSONオブジェクト1個だけ。説明文・前置き・コードブロック記号・謝罪は一切禁止
+- 画像が暗い・ぼやけている・注文票でない等で読めない場合も、JSONで返す:
+  {"卓番号": null, "人数": null, "コースの数": 0, "注文": [], "flags": [{"cell": "全体", "理由": "読めない理由を短く"}]}
+- 影や暗さがあっても、読める数字は読む。自信が低いマスはflagsに挙げた上で注文にも含める
+
+{"卓番号": 数値またはnull, "人数": 数値またはnull, "コースの数": 数値, "注文": [{"cell": "番地", "数": 数値}], "flags": [{"cell": "番地", "理由": "短い説明"}]}
 記入のないマスは注文に含めない。`;
 
 const CORS = {
@@ -130,11 +140,21 @@ async function handleLedger(request, env, path) {
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    const url = new URL(request.url);
     if (env.APP_KEY) {
-      const k = request.headers.get("x-app-key") || "";
+      const k = request.headers.get("x-app-key") || url.searchParams.get("k") || "";
       if (k !== env.APP_KEY) return json({ ok: false, error: "合言葉が一致しません。アプリの設定の「読み取りの合言葉」を確認してください" }, 401);
     }
-    const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    if (path === "/photo" && request.method === "GET") {
+      if (!env.PHOTOS) return json({ ok: false, error: "写真保存が未設定です(R2バインディングPHOTOSを追加してください)" }, 501);
+      const key = url.searchParams.get("key") || "";
+      const obj = await env.PHOTOS.get(key);
+      if (!obj) return json({ ok: false, error: "写真が見つかりません" }, 404);
+      return new Response(obj.body, {
+        headers: { "Content-Type": (obj.httpMetadata && obj.httpMetadata.contentType) || "image/jpeg", "Cache-Control": "private, max-age=86400", ...CORS },
+      });
+    }
     if (path === "/state" || path === "/slip" || path === "/intake" || path === "/intake/delete" || path === "/meta") {
       return handleLedger(request, env, path);
     }
@@ -163,6 +183,8 @@ export default {
         body: JSON.stringify({
           model,
           max_tokens: 1500,
+          temperature: 0,
+          system: "あなたは注文票読み取り係。応答は必ず指定のJSONオブジェクト1個のみ。それ以外の文字を出力してはならない。",
           messages: [{
             role: "user",
             content: [
@@ -185,8 +207,19 @@ export default {
     const text = (payload.content || []).filter(c => c.type === "text").map(c => c.text).join("\n");
     let data;
     try { data = extractJson(text); } catch (e) {
-      return json({ ok: false, error: "読み取り結果の解釈に失敗: " + e.message, raw: text.slice(0, 500) }, 502);
+      return json({ ok: false, error: "読み取り結果の解釈に失敗: " + e.message + (text ? " / AIの応答: " + text.slice(0, 160) : " / AIの応答が空でした"), raw: text.slice(0, 500) }, 502);
     }
-    return json({ ok: true, data, model });
+    /* 注文票の写真を保管(電子帳簿保存の原始記録。R2未設定なら黙ってスキップ) */
+    let photoKey = null;
+    if (env.PHOTOS) {
+      try {
+        const bin = Uint8Array.from(atob(image), c => c.charCodeAt(0));
+        const d = new Date();
+        const dateStr = d.toISOString().slice(0, 10);
+        photoKey = dateStr + "/" + d.getTime() + "-" + Math.floor(Math.random() * 1000) + ".jpg";
+        await env.PHOTOS.put(photoKey, bin, { httpMetadata: { contentType: mediaType } });
+      } catch (e) { photoKey = null; }
+    }
+    return json({ ok: true, data, model, photoKey });
   },
 };
