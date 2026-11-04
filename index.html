@@ -312,6 +312,11 @@ function nextRetailId() {
 
 const QTY_FLAG = 10; // この数以上は確認表示
 
+/* 会計時の調整プリセット。amt:金額(マイナス=値引き) / back:在庫に戻す品目 */
+const ADJUST_PRESETS = [
+  { label: "卵抜き", amt: -150, back: [["S_EGG", 1]] },
+];
+
 /* ===== 在庫マスタ =====
    type: "daily"=毎朝仕込み(当日限り) / "carry"=繰越(残が翌日に持ち越し) */
 const STOCK_ITEMS = [
@@ -357,6 +362,7 @@ function slipConsumption(slip) {
   const c = {};
   const add = (id, q) => { c[id] = (c[id] || 0) + q; };
   for (const [id, q] of COURSE_RECIPE) add(id, q * (slip.course || 0));
+  for (const a of (slip.adjust || [])) for (const [id, q] of (a.back || [])) add(id, -q);
   const RETAIL_BY_ID = Object.fromEntries(allRetail().map(r => [r.id, r]));
   for (const key in slip.items) {
     const qty = slip.items[key];
@@ -578,6 +584,9 @@ function slipLines(slip) {
   for (const r of allRetail()) {
     const q = slip.items[r.id] || 0;
     if (q > 0) lines.push({ name: "物販 " + r.name, qty: q, unit: r.price, amt: q * r.price, retail: true });
+  }
+  for (const a of (slip.adjust || [])) {
+    lines.push({ name: "調整 " + a.label, qty: 1, unit: a.amt, amt: a.amt, adjust: true });
   }
   return lines;
 }
@@ -844,6 +853,23 @@ function renderPay() {
   }
   h += '<div class="row total"><span>合計</span><span class="num">' + yen(total) + "</span></div></div>";
 
+  /* 調整(値引き・追加料金) */
+  h += '<div class="tender"><div style="font-weight:700;margin-bottom:8px;">調整(値引き・追加)</div>';
+  for (let i = 0; i < (slip.adjust || []).length; i++) {
+    const a = slip.adjust[i];
+    h += '<div class="trow" style="margin-bottom:6px;"><span>' + esc(a.label) + ' <b class="num">' + (a.amt < 0 ? "−" + yen(-a.amt) : "+" + yen(a.amt)) + '</b></span>' +
+      '<button data-rmadj="' + i + '" style="color:var(--shu);border:1px solid var(--rule);padding:4px 10px;font-size:13px;">取消</button></div>';
+  }
+  h += '<div class="quick" style="margin-bottom:8px;">';
+  ADJUST_PRESETS.forEach((p, i) => {
+    h += '<button data-preset="' + i + '">' + esc(p.label) + " " + (p.amt < 0 ? "−" + yen(-p.amt) : "+" + yen(p.amt)) + "</button>";
+  });
+  h += '</div><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
+    '<input id="adjLabel" placeholder="内容(例:サービス)" style="flex:2;min-width:120px;padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;">' +
+    '<select id="adjSign" style="padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;"><option value="-1">値引き −</option><option value="1">追加 +</option></select>' +
+    '<input id="adjAmt" class="num" inputmode="numeric" placeholder="円" style="width:90px;padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;text-align:right;">' +
+    '<button class="btn" id="btnAdj">追加</button></div></div>';
+
   h += '<div class="paymethod">' +
     '<button id="pmCash" class="' + (slip.payTmp === "現金" ? "on" : "") + '">現金</button>' +
     '<button id="pmQR" class="' + (slip.payTmp === "QR" ? "on" : "") + '">QR決済</button></div>';
@@ -871,6 +897,25 @@ function renderPay() {
 
   main.innerHTML = h;
   document.getElementById("btnBack").onclick = () => { view.mode = "edit"; render(); };
+  const afterAdj = () => { slip.tendered = null; save(); pushSlipNow(slip); render(); };
+  main.querySelectorAll("[data-preset]").forEach(el => el.onclick = () => {
+    const p = ADJUST_PRESETS[Number(el.dataset.preset)];
+    (slip.adjust = slip.adjust || []).push({ label: p.label, amt: p.amt, back: p.back || [] });
+    afterAdj();
+  });
+  main.querySelectorAll("[data-rmadj]").forEach(el => el.onclick = () => {
+    slip.adjust.splice(Number(el.dataset.rmadj), 1);
+    afterAdj();
+  });
+  const ba = document.getElementById("btnAdj");
+  if (ba) ba.onclick = () => {
+    const label = document.getElementById("adjLabel").value.trim() || "調整";
+    const n = Number(document.getElementById("adjAmt").value.replace(/[^0-9]/g, ""));
+    if (!n) { alert("金額を入れてください"); return; }
+    const amt = n * Number(document.getElementById("adjSign").value);
+    (slip.adjust = slip.adjust || []).push({ label, amt, back: [] });
+    afterAdj();
+  };
   document.getElementById("pmCash").onclick = () => { slip.payTmp = "現金"; render(); };
   document.getElementById("pmQR").onclick = () => { slip.payTmp = "QR"; slip.tendered = null; render(); };
   const it = document.getElementById("inTender");
