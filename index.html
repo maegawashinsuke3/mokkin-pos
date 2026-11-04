@@ -1384,7 +1384,7 @@ async function readShot(inputEl) {
   if (!file) return;
   busy.style.display = "flex";
   try {
-    const b64 = await shrinkToBase64(file, 1600, 0.85);
+    const b64 = await shrinkToBase64(file, 2400, 0.85); // 長辺2400px≒A4で200dpi相当(電帳法スキャナ保存の解像度要件)
     const cfg = loadCfg();
     const hdrs = { "Content-Type": "application/json" };
     if (cfg.appKey) hdrs["x-app-key"] = cfg.appKey;
