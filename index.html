@@ -296,7 +296,7 @@ const GOODS = [
    どちらも書かなければ自社品。月次集計は締めタブの「物販の月次精算」 */
 const RETAIL = [
   { id: "B1", name: "木琴の味(瓶)", price: 700, stock: [["S_BIN", 1]] },
-  { id: "B2", name: "村の卵(1個)", price: 100, stock: [["S_EGG_PKG", 1]] },
+  { id: "B2", name: "村の卵(1個)", price: 100, stock: [["S_EGG_PKG", 1]], retired: true }, // 販売終了(2026-11-05)。卵は画面から追加した「すこやか卵(10個入り/6個入り)」で販売
   { id: "B10", name: "かまどはん", price: 11880, stock: [], supplier: "閑心窯", costRate: 0.6 }, // 仕入品・定価11,880円。掛率0.6は記憶ベースの仮値──閑心窯の請求書/納品書で確認し、違えばこの数字だけ直す(会計金額には影響しない。月次の粗利表示のみに効く)
   // 自社品の追加例: { id: "B3", name: "蕎麦茶(1パック)", price: 300, stock: [["S_CHA", 1]] },
   // 委託品の追加例: { id: "B11", name: "〇〇さんの品", price: 1000, stock: [], consignor: "〇〇さん", feeRate: 0.10 },
@@ -311,6 +311,7 @@ function nextRetailId() {
 }
 
 const QTY_FLAG = 10; // この数以上は確認表示
+const USE_QR = false; // 現金のみの運用(2026-11-05)。QR決済を始めたら true に戻すとボタンと集計欄が復活する
 
 /* 会計時の調整プリセット。amt:金額(マイナス=値引き) / back:在庫に戻す品目 */
 const ADJUST_PRESETS = [
@@ -334,7 +335,7 @@ const STOCK_ITEMS = [
   { id: "S_BEER",   name: "缶ビール",   unit: "本",  type: "carry" },
   { id: "S_NONAL",  name: "缶ノンアル", unit: "本",  type: "carry" },
   { id: "S_BIN",    name: "木琴の味(瓶)", unit: "本", type: "carry" },
-  { id: "S_EGG_PKG", name: "販売用卵(パック済)", unit: "個", type: "carry" },
+  { id: "S_EGG_PKG", name: "販売用卵(パック済)", unit: "個", type: "carry", retired: true }, // 不使用(B2とともに廃止)
 ];
 const STOCK_BY_ID = Object.fromEntries(STOCK_ITEMS.map(i => [i.id, i]));
 /* 画面から追加した物販品のうち「在庫を数える」品は、繰越型の在庫品目として自動で加わる */
@@ -993,7 +994,8 @@ function renderPay() {
     '<input id="adjAmt" class="num" inputmode="numeric" placeholder="円" style="width:90px;padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;text-align:right;">' +
     '<button class="btn" id="btnAdj">追加</button></div></div>';
 
-  h += '<div class="paymethod">' +
+  if (!USE_QR) slip.payTmp = "現金";
+  if (USE_QR) h += '<div class="paymethod">' +
     '<button id="pmCash" class="' + (slip.payTmp === "現金" ? "on" : "") + '">現金</button>' +
     '<button id="pmQR" class="' + (slip.payTmp === "QR" ? "on" : "") + '">QR決済</button></div>';
 
@@ -1041,8 +1043,9 @@ function renderPay() {
     (slip.adjust = slip.adjust || []).push({ label, amt, back: [] });
     afterAdj();
   };
-  document.getElementById("pmCash").onclick = () => { slip.payTmp = "現金"; render(); };
-  document.getElementById("pmQR").onclick = () => { slip.payTmp = "QR"; slip.tendered = null; render(); };
+  const pmC = document.getElementById("pmCash"), pmQ = document.getElementById("pmQR");
+  if (pmC) pmC.onclick = () => { slip.payTmp = "現金"; render(); };
+  if (pmQ) pmQ.onclick = () => { slip.payTmp = "QR"; slip.tendered = null; render(); };
   const it = document.getElementById("inTender");
   if (it) {
     it.onchange = () => { slip.tendered = it.value === "" ? null : Number(it.value.replace(/[^0-9]/g, "")) || 0; render(); };
@@ -1101,7 +1104,7 @@ function renderClose() {
     })() +
     '<div class="kv"><span>うち物販</span><b class="num">' + yen(paidSlips.reduce((a, s2) => a + slipRetailTotal(s2), 0)) + "</b></div>" +
     '<div class="kv"><span>現金</span><b class="num">' + yen(cash) + "</b></div>" +
-    '<div class="kv"><span>QR決済</span><b class="num">' + yen(qr) + "</b></div>" +
+    ((USE_QR || qr) ? '<div class="kv"><span>QR決済</span><b class="num">' + yen(qr) + "</b></div>" : "") +
     (openSlips.length ? '<div class="kv"><span class="warnv">未会計の伝票</span><b class="warnv num">' + openSlips.length + "件</b></div>" : "") +
     "</div>";
 
@@ -1178,7 +1181,8 @@ function renderClose() {
     for (const p of plist) h += '<option value="' + p + '"' + (p === view.aggKey ? " selected" : "") + ">" + p + "</option>";
     h += '</select></span></div>';
     h += '<div class="kv big"><span>売上合計(' + A.days + '営業日・' + A.slips + '伝票)</span><b class="num">' + yen(A.sales) + "</b></div>";
-    h += '<div class="kv"><span>現金 / QR</span><b class="num">' + yen(A.cash) + " / " + yen(A.qr) + "</b></div>";
+    h += (USE_QR || A.qr) ? '<div class="kv"><span>現金 / QR</span><b class="num">' + yen(A.cash) + " / " + yen(A.qr) + "</b></div>"
+      : '<div class="kv"><span>うち現金</span><b class="num">' + yen(A.cash) + "</b></div>";
     h += '<div class="kv"><span>うち物販</span><b class="num">' + yen(A.retail) + "</b></div>";
     h += '<div class="kv"><span>客数・客単価(人数記入分)</span><b class="num">' + A.guests + "人・" + (A.guests > 0 ? yen(Math.round(A.sales / A.guests)) : "−") + "</b></div>";
     h += '<div class="kv"><span>日平均売上</span><b class="num">' + (A.days > 0 ? yen(Math.round(A.sales / A.days)) : "−") + "</b></div>";
@@ -1398,7 +1402,7 @@ function renderStock() {
   }
   for (const r of allRetail()) {
     const n = rem[r.id];
-    if (n === Infinity) continue;
+    if (n === Infinity || r.retired) continue;
     h += '<div class="kv"><span>物販 ' + esc(r.name) + '</span><b class="num' + (n <= 0 ? " warnv" : "") + '">' + n + "</b></div>";
   }
   h += '<div class="kv"><span style="color:var(--dim);font-size:12px;">材料は品目間で共有のため、各行は「その品だけ出した場合」の上限です</span><b></b></div>';
