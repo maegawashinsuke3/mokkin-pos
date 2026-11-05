@@ -295,7 +295,13 @@ const GOODS = [
    supplier: 仕入先の名前+costRate: 仕入掛率(例0.6=6掛け)=仕入品(買取済・精算不要、月次で粗利を表示)。
    どちらも書かなければ自社品。月次集計は締めタブの「物販の月次精算」 */
 const RETAIL = [
-  { id: "B1", name: "木琴の味(瓶)", price: 700, stock: [["S_BIN", 1]] },
+  { id: "B1", name: "木琴の味(瓶)", price: 700, stock: [["S_BIN", 1]], retired: true }, // 2026-11-05 容量別(B3/B4)に分割して販売終了
+  { id: "B3", name: "木琴の味 200ml", price: 700, stock: [["S_MK200", 1]] },
+  { id: "B4", name: "木琴の味 500ml", price: 1400, stock: [["S_MK500", 1]] },
+  { id: "B5", name: "人参ジュース 350ml", price: 500, stock: [["S_NINJIN", 1]], consignor: "宮垣さん", feeRate: 0.10 },
+  { id: "B6", name: "真空蒸留木酢液 爽美林 500ml", price: 4100, stock: [["S_SOBI500", 1]] },
+  { id: "B7", name: "真空蒸留木酢液 爽美林 150ml", price: 2050, stock: [["S_SOBI150", 1]] },
+  { id: "B8", name: "やさしく洗える石けん", price: 1200, stock: [["S_SOAP", 1]] },
   { id: "B2", name: "村の卵(1個)", price: 100, stock: [["S_EGG_PKG", 1]], retired: true }, // 販売終了(2026-11-05)。卵は画面から追加した「すこやか卵(10個入り/6個入り)」で販売
   { id: "B10", name: "かまどはん", price: 11880, stock: [], supplier: "閑心窯", costRate: 0.6 }, // 仕入品・定価11,880円。掛率0.6は記憶ベースの仮値──閑心窯の請求書/納品書で確認し、違えばこの数字だけ直す(会計金額には影響しない。月次の粗利表示のみに効く)
   // 自社品の追加例: { id: "B3", name: "蕎麦茶(1パック)", price: 300, stock: [["S_CHA", 1]] },
@@ -334,7 +340,13 @@ const STOCK_ITEMS = [
   { id: "S_ZENZAI", name: "蕎麦ゼリーぜんざい", unit: "人前", type: "carry" },
   { id: "S_BEER",   name: "缶ビール",   unit: "本",  type: "carry" },
   { id: "S_NONAL",  name: "缶ノンアル", unit: "本",  type: "carry" },
-  { id: "S_BIN",    name: "木琴の味(瓶)", unit: "本", type: "carry" },
+  { id: "S_BIN",    name: "木琴の味(瓶)", unit: "本", type: "carry", retired: true }, // B1とともに廃止
+  { id: "S_MK200",  name: "木琴の味 200ml", unit: "本", type: "carry" },
+  { id: "S_MK500",  name: "木琴の味 500ml", unit: "本", type: "carry" },
+  { id: "S_NINJIN", name: "人参ジュース 350ml", unit: "本", type: "carry" },
+  { id: "S_SOBI500", name: "爽美林 500ml", unit: "本", type: "carry" },
+  { id: "S_SOBI150", name: "爽美林 150ml", unit: "本", type: "carry" },
+  { id: "S_SOAP",   name: "やさしく洗える石けん", unit: "個", type: "carry" },
   { id: "S_EGG_PKG", name: "販売用卵(パック済)", unit: "個", type: "carry", retired: true }, // 不使用(B2とともに廃止)
 ];
 const STOCK_BY_ID = Object.fromEntries(STOCK_ITEMS.map(i => [i.id, i]));
@@ -1774,10 +1786,10 @@ if (location.search.includes("qa=")) {
       { ts: 10, date: today(), time: "08:00", item: "S_ZENZAI", qty: 10 },
       { ts: 11, date: today(), time: "08:00", item: "S_BEER", qty: 12 },
       { ts: 12, date: today(), time: "08:00", item: "S_NONAL", qty: 6 },
-      { ts: 13, date: today(), time: "08:00", item: "S_BIN", qty: 8 },
+      { ts: 13, date: today(), time: "08:00", item: "S_MK200", qty: 8 },
       { ts: 14, date: today(), time: "08:00", item: "S_EGG_PKG", qty: 18 },
     ];
-    DB.slips[0].items["B1"] = 1; DB.slips[0].items["B2"] = 6;
+    DB.slips[0].items["B3"] = 1;
     DB.denoms = {}; DB.denoms[today()] = { "5000": 1, "1000": 1, "500": 1, "100": 1 };
     save();
     const q = new URLSearchParams(location.search).get("qa");
