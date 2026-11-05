@@ -567,13 +567,15 @@ async function fetchState() {
     const out = await api("/state", "GET");
     DB.slips = out.slips || [];
     DB.intake = out.intake || [];
-    DB.prep = {}; DB.denoms = {}; DB.retailCustom = []; DB.cashMoves = {}; DB.carry = {};
+    DB.prep = {}; DB.denoms = {}; DB.retailCustom = []; DB.cashMoves = {}; DB.carry = {}; DB.locks = {}; DB.lockHist = {};
     for (const k in (out.meta || {})) {
       if (k.startsWith("prep:")) DB.prep[k.slice(5)] = Number(out.meta[k]) || 0;
       if (k.startsWith("denoms:")) { try { DB.denoms[k.slice(7)] = JSON.parse(out.meta[k]); } catch (e) {} }
       if (k === "retail_custom") { try { DB.retailCustom = JSON.parse(out.meta[k]) || []; } catch (e) {} }
       if (k.startsWith("cash:")) { try { DB.cashMoves[k.slice(5)] = JSON.parse(out.meta[k]) || []; } catch (e) {} }
       if (k.startsWith("carry:")) DB.carry[k.slice(6)] = Number(out.meta[k]) || 0;
+      if (k.startsWith("lock:")) { try { const v = JSON.parse(out.meta[k]); if (v) DB.locks[k.slice(5)] = v; } catch (e) {} }
+      if (k.startsWith("lockhist:")) { try { DB.lockHist[k.slice(9)] = JSON.parse(out.meta[k]) || []; } catch (e) {} }
     }
     save();
     setSync(true);
@@ -657,7 +659,10 @@ let view = { tab: "slips", mode: "list", slipId: null, closeDate: today() };
 
 function findSlip(id) { return DB.slips.find(s => s.id === id); }
 
+function isLocked(dateStr) { return !!(DB.locks && DB.locks[dateStr]); }
+function lockedAlert(dateStr) { alert(dateStr + " は締めを確定済みです。追加・修正するには、締めタブで「確定を解除」してください。"); }
 function newStaffSlip() {
+  if (isLocked(today())) { lockedAlert(today()); return; }
   const slip = {
     id: genId(), date: today(), time: nowTime(),
     table: "賄い", status: "staff", people: 0,
@@ -669,6 +674,7 @@ function newStaffSlip() {
   render();
 }
 function newSlip() {
+  if (isLocked(today())) { lockedAlert(today()); return; }
   const slip = {
     id: genId(),
     date: today(), time: nowTime(),
@@ -709,6 +715,7 @@ function renderList() {
     '</div>' +
     '<button class="newslip" id="btnStaff" style="background:#fff;color:var(--ink);font-size:15px;padding:10px;">＋ 賄いを記録(売上にせず在庫だけ減らす)</button>' +
     '<div class="sliplist">';
+  if (isLocked(today())) h += '<div class="warn" style="border-color:var(--ink);color:var(--ink);">本日の締めは確定済みです。追加・修正するには締めタブで「確定を解除」してください。</div>';
   if (!slips.length) h += '<div class="empty">本日の伝票はまだありません</div>';
   const nowMin = (() => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); })();
   for (const s of slips) {
@@ -757,7 +764,8 @@ function renderList() {
 function renderEditor() {
   const slip = findSlip(view.slipId);
   if (!slip) { view.mode = "list"; renderList(); return; }
-  const paid = slip.status === "paid";
+  const locked = isLocked(slip.date);
+  const paid = slip.status === "paid" || locked; // 確定済みの日は読み取り専用
   const warns = slipWarnings(slip);
 
   let h = '<div class="ed-top">' +
@@ -823,7 +831,9 @@ function renderEditor() {
   const total = slipTotal(slip);
   h += '<div class="edfoot"><div class="inner">' +
     '<div class="total">合計<b class="num">' + yen(total) + "</b></div>";
-  if (slip.status === "staff") {
+  if (locked) {
+    h += '<span style="font-size:13px;color:var(--dim);">締め確定済みの日のため編集できません</span>';
+  } else if (slip.status === "staff") {
     h += '<span style="font-size:13px;color:var(--dim);">賄い:売上にならず在庫だけ減ります</span>' +
       '<button class="btn ghost" id="btnVoid">削除</button>' +
       '<button class="btn primary" id="btnStaffDone">記録して戻る</button>';
@@ -876,7 +886,8 @@ function renderEditor() {
     const bp = document.getElementById("btnPay");
     if (bp) bp.onclick = () => { view.mode = "pay"; render(); };
   } else {
-    document.getElementById("btnUnpay").onclick = () => confirmDlg("会計を取り消して未会計に戻しますか?", () => {
+    const bun = document.getElementById("btnUnpay");
+    if (bun) bun.onclick = () => confirmDlg("会計を取り消して未会計に戻しますか?", () => {
       slip.status = "open"; slip.pay = null; slip.tendered = null; save(); pushSlipNow(slip); render();
     });
   }
@@ -991,6 +1002,7 @@ function renderSplit() {
 function renderPay() {
   const slip = findSlip(view.slipId);
   if (!slip) { view.mode = "list"; renderList(); return; }
+  if (isLocked(slip.date)) { view.mode = "edit"; renderEditor(); return; }
   const lines = slipLines(slip);
   const total = slipTotal(slip);
   if (!slip.payTmp) slip.payTmp = "現金";
@@ -1255,8 +1267,26 @@ function renderClose() {
     h += "</div>";
   }
 
-  h += '<div class="csvbtns"><button class="btn" id="btnCsv">明細CSVを保存</button><button class="btn" id="btnCsvSum">日計CSVを保存</button></div>' +
-    '<p style="color:var(--dim);font-size:13px;">CSVはこの端末のダウンロードに保存されます。Excelでそのまま開けます。</p>';
+  /* 締めの確定 */
+  const lk = DB.locks && DB.locks[D];
+  const hist = (DB.lockHist && DB.lockHist[D]) || [];
+  h += '<div class="close-sec"><h2>締めの確定</h2>';
+  if (lk) {
+    const c0 = loadCfg();
+    const base = (c0.readerUrl || "").replace(/\/+$/, "");
+    const link = (key, label) => base && key ? '<a href="' + esc(base + "/photo?key=" + encodeURIComponent(key) + (c0.appKey ? "&k=" + encodeURIComponent(c0.appKey) : "")) + '" target="_blank" style="color:var(--shu);margin-right:12px;">' + label + "</a>" : "";
+    h += '<div class="kv big"><span>確定済み(' + esc(lk.at || "") + ')</span><b class="num">' + yen(lk.sales || 0) + "</b></div>" +
+      '<div class="kv"><span>クラウドの控え</span><span>' + (lk.keys ? link(lk.keys.daily, "日計") + link(lk.keys.detail, "明細") : '<span style="color:var(--dim);font-size:13px;">保存待ち(通信が戻ると送信)</span>') + "</span></div>" +
+      '<div style="padding:8px 12px 12px;"><button class="btn ghost" id="btnUnlock" style="width:100%;">確定を解除する(修正が必要な時だけ)</button></div>';
+  } else {
+    h += '<div style="padding:10px 12px;font-size:13px;color:var(--dim);">お金を数えて「明日に残す釣銭」を入れたら、最後にこのボタンを押します。この日の数字がクラウドに控えとして保存され、伝票は修正できなくなります。</div>' +
+      '<div style="padding:0 12px 12px;"><button class="btn primary" id="btnLock" style="width:100%;padding:14px;">締めを確定する</button></div>';
+  }
+  if (hist.length) {
+    h += '<div style="padding:0 12px 10px;font-size:12px;color:var(--dim);">履歴: ' + hist.map(x => esc(x.at) + " " + (x.a === "lock" ? "確定" : "解除")).join(" / ") + "</div>";
+  }
+  h += "</div>";
+  h += '<div style="margin:6px 0 4px;font-size:12px;color:var(--dim);">手元に保存したい時だけ: <a href="#" id="btnCsv" style="color:var(--dim);">明細CSV</a>　<a href="#" id="btnCsvSum" style="color:var(--dim);">日計CSV</a></div>';
 
   main.innerHTML = h;
   document.getElementById("selDate").onchange = e => { view.closeDate = e.target.value; render(); };
@@ -1303,8 +1333,52 @@ function renderClose() {
   if (selYm) selYm.onchange = e => { view.consignYm = e.target.value; render(); };
   const bcc = document.getElementById("btnCsvConsign");
   if (bcc) bcc.onclick = () => downloadConsign(view.consignYm);
-  document.getElementById("btnCsv").onclick = () => downloadCsv(D, slips);
-  document.getElementById("btnCsvSum").onclick = () => downloadDaily(D, sales, cash, qr, counts, prep, counted, diff);
+  document.getElementById("btnCsv").onclick = e => { e.preventDefault(); downloadCsv(D, slips); };
+  document.getElementById("btnCsvSum").onclick = e => { e.preventDefault(); downloadDaily(D, sales, cash, qr, counts, prep, counted, diff); };
+  const pushHist = (a) => {
+    if (!DB.lockHist) DB.lockHist = {};
+    (DB.lockHist[D] = DB.lockHist[D] || []).push({ a, at: today() + " " + nowTime() });
+    queueOp("/meta", { k: "lockhist:" + D, v: JSON.stringify(DB.lockHist[D]) });
+  };
+  const bl = document.getElementById("btnLock");
+  if (bl) bl.onclick = () => {
+    if (openSlips.length) { alert("未会計の伝票が " + openSlips.length + " 件あります。会計するか削除してから確定してください。"); return; }
+    confirmDlg(D + " の締めを確定しますか?(売上 " + yen(sales) + "・差額 " + (diff > 0 ? "+" : "") + yen(diff) + ")", async () => {
+      if (!DB.locks) DB.locks = {};
+      const files = {
+        "daily.csv": "\uFEFF" + dailyCsvText(D, sales, cash, qr, counts, prep, counted, diff),
+        "detail.csv": "\uFEFF" + detailCsvText(D, slips.slice()),
+        "data.json": JSON.stringify({ date: D, sales, cash, qr, prep, counted, diff, carry: DB.carry && DB.carry[D], moves: (DB.cashMoves || {})[D] || [], slips }),
+      };
+      const lockRec = { at: today() + " " + nowTime(), sales, diff, keys: null };
+      DB.locks[D] = lockRec;
+      save(); pushHist("lock");
+      queueOp("/meta", { k: "lock:" + D, v: JSON.stringify(lockRec) });
+      render();
+      try {
+        const out = await api("/snapshot", "POST", { date: D, kind: "close", files });
+        lockRec.keys = {};
+        for (const k of out.keys) {
+          if (k.endsWith("-daily.csv")) lockRec.keys.daily = k;
+          if (k.endsWith("-detail.csv")) lockRec.keys.detail = k;
+          if (k.endsWith("-data.json")) lockRec.keys.data = k;
+        }
+        save(); queueOp("/meta", { k: "lock:" + D, v: JSON.stringify(lockRec) }); render();
+      } catch (e) {
+        alert("締めは確定しましたが、クラウドへの控えの保存に失敗しました:\n" + e.message + "\n\n通信を確認して、確定を解除→もう一度確定してください。");
+      }
+    });
+  };
+  const bu = document.getElementById("btnUnlock");
+  if (bu) bu.onclick = () => confirmDlg(D + " の確定を解除しますか?解除した記録は残ります。修正が終わったら、もう一度確定してください。", () => {
+    delete DB.locks[D];
+    save(); pushHist("unlock");
+    queueOp("/meta", { k: "lock:" + D, v: "" });
+    render();
+  });
+  if (isLocked(D)) {
+    main.querySelectorAll("#inPrep, #inCarry, #mvKind, #mvMemo, #mvAmt, #btnMove, [data-dn], [data-rmmove]").forEach(el => { el.disabled = true; el.onclick = null; el.onchange = null; });
+  }
 }
 
 /* ---- 期間集計(月次・年次) ---- */
@@ -1417,16 +1491,18 @@ function downloadFile(name, text) {
   document.body.appendChild(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
 }
-function downloadCsv(D, slips) {
+function downloadCsv(D, slips) { downloadFile("木琴_明細_" + D + ".csv", detailCsvText(D, slips)); }
+function detailCsvText(D, slips) {
   const rows = [["日付", "伝票ID", "時刻", "卓番号", "人数", "状態", "支払方法", "品目", "数量", "単価", "金額", "写真"]];
   for (const s of slips.sort((a, b) => a.id - b.id)) {
     for (const l of slipLines(s)) {
       rows.push([s.date, s.id, s.time, s.table, s.people || "", s.status === "paid" ? "会計済" : "未会計", s.pay || "", l.name, l.qty, l.unit, l.amt, (s.photos || []).join(" ")]);
     }
   }
-  downloadFile("木琴_明細_" + D + ".csv", rows.map(r => r.map(csvCell).join(",")).join("\n"));
+  return rows.map(r => r.map(csvCell).join(",")).join("\n");
 }
-function downloadDaily(D, sales, cash, qr, counts, prep, counted, diff) {
+function downloadDaily(D, sales, cash, qr, counts, prep, counted, diff) { downloadFile("木琴_日計_" + D + ".csv", dailyCsvText(D, sales, cash, qr, counts, prep, counted, diff)); }
+function dailyCsvText(D, sales, cash, qr, counts, prep, counted, diff) {
   const guests = DB.slips.filter(s2 => s2.date === D && s2.status === "paid").reduce((a, s2) => a + (s2.people || 0), 0);
   const rows = [["日付", D], ["売上合計", sales], ["現金売上", cash], ["QR売上", qr],
     ["客数(人数記入分)", guests], ["客単価", guests > 0 ? Math.round(sales / guests) : ""],
@@ -1443,7 +1519,7 @@ function downloadDaily(D, sales, cash, qr, counts, prep, counted, diff) {
     const inQ = (DB.intake || []).filter(r => r.date === D && r.item === it.id).reduce((a, r) => a + r.qty, 0);
     rows.push([it.name, it.type === "daily" ? "毎朝" : "繰越", inQ, bal[it.id]]);
   }
-  downloadFile("木琴_日計_" + D + ".csv", rows.map(r => r.map(csvCell).join(",")).join("\n"));
+  return rows.map(r => r.map(csvCell).join(",")).join("\n");
 }
 
 /* ---- 確認ダイアログ ---- */
@@ -1557,6 +1633,7 @@ function renderStock() {
 
   main.innerHTML = h;
   document.getElementById("btnIntake").onclick = () => {
+    if (isLocked(today())) { lockedAlert(today()); return; }
     const item = document.getElementById("inItem").value;
     const raw = parseFloat(document.getElementById("inQty").value);
     const mode = (main.querySelector('input[name="inMode"]:checked') || {}).value || "add";
@@ -1713,12 +1790,14 @@ const libInput = document.getElementById("libInput");
 const busy = document.getElementById("busy");
 let mergeTarget = null; // 追加読み取りの合算先伝票ID
 function startShot() {
+  if (isLocked(today())) { lockedAlert(today()); return; }
   if (!loadCfg().readerUrl) { openSettings(); return; }
   mergeTarget = null;
   camInput.value = "";
   camInput.click();
 }
 function startLib() {
+  if (isLocked(today())) { lockedAlert(today()); return; }
   if (!loadCfg().readerUrl) { openSettings(); return; }
   mergeTarget = null;
   libInput.value = "";
