@@ -567,11 +567,13 @@ async function fetchState() {
     const out = await api("/state", "GET");
     DB.slips = out.slips || [];
     DB.intake = out.intake || [];
-    DB.prep = {}; DB.denoms = {}; DB.retailCustom = [];
+    DB.prep = {}; DB.denoms = {}; DB.retailCustom = []; DB.cashMoves = {}; DB.carry = {};
     for (const k in (out.meta || {})) {
       if (k.startsWith("prep:")) DB.prep[k.slice(5)] = Number(out.meta[k]) || 0;
       if (k.startsWith("denoms:")) { try { DB.denoms[k.slice(7)] = JSON.parse(out.meta[k]); } catch (e) {} }
       if (k === "retail_custom") { try { DB.retailCustom = JSON.parse(out.meta[k]) || []; } catch (e) {} }
+      if (k.startsWith("cash:")) { try { DB.cashMoves[k.slice(5)] = JSON.parse(out.meta[k]) || []; } catch (e) {} }
+      if (k.startsWith("carry:")) DB.carry[k.slice(6)] = Number(out.meta[k]) || 0;
     }
     save();
     setSync(true);
@@ -655,6 +657,17 @@ let view = { tab: "slips", mode: "list", slipId: null, closeDate: today() };
 
 function findSlip(id) { return DB.slips.find(s => s.id === id); }
 
+function newStaffSlip() {
+  const slip = {
+    id: genId(), date: today(), time: nowTime(),
+    table: "賄い", status: "staff", people: 0,
+    course: 0, items: {}, pay: null, tendered: null,
+  };
+  DB.slips.push(slip); save();
+  pushSlipNow(slip);
+  view = { ...view, mode: "edit", slipId: slip.id };
+  render();
+}
 function newSlip() {
   const slip = {
     id: genId(),
@@ -693,7 +706,9 @@ function renderList() {
     '<div style="display:flex;gap:8px;margin-bottom:14px;">' +
     '<button class="newslip" id="btnNew" style="margin-bottom:0;flex:1.3;">＋ 新規伝票(手入力)</button>' +
     '<button class="newslip" id="btnPaste" style="margin-bottom:0;flex:1;background:#fff;color:var(--ink);font-size:15px;white-space:nowrap;padding:14px 8px;">読み取り貼り付け</button>' +
-    '</div><div class="sliplist">';
+    '</div>' +
+    '<button class="newslip" id="btnStaff" style="background:#fff;color:var(--ink);font-size:15px;padding:10px;">＋ 賄いを記録(売上にせず在庫だけ減らす)</button>' +
+    '<div class="sliplist">';
   if (!slips.length) h += '<div class="empty">本日の伝票はまだありません</div>';
   const nowMin = (() => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); })();
   for (const s of slips) {
@@ -706,8 +721,8 @@ function renderList() {
     h += '<button class="slipcard ' + (s.status === "paid" ? "paid" : "") + '" data-id="' + s.id + '">' +
       '<span class="tno num">卓 ' + esc(s.table || "−") + '</span>' +
       '<span class="meta num">#' + shortId(s.id) + "　" + s.time + (s.pay ? "　" + s.pay : "") + ((s.splitFrom || (s.splitTo && s.splitTo.length)) ? "　別会計" : "") + elapsed + "</span>" +
-      '<span class="st ' + s.status + '">' + (s.status === "paid" ? "会計済" : "未会計") + "</span>" +
-      '<span class="amt num">' + yen(t) + "</span></button>";
+      '<span class="st ' + s.status + '">' + (s.status === "paid" ? "会計済" : s.status === "staff" ? "賄い" : "未会計") + "</span>" +
+      '<span class="amt num">' + (s.status === "staff" ? "−" : yen(t)) + "</span></button>";
   }
   h += "</div>";
 
@@ -728,6 +743,7 @@ function renderList() {
 
   main.innerHTML = h;
   document.getElementById("btnNew").onclick = newSlip;
+  document.getElementById("btnStaff").onclick = newStaffSlip;
   document.getElementById("btnPaste").onclick = openPaste;
   document.getElementById("btnShot").onclick = startShot;
   document.getElementById("btnLib").onclick = startLib;
@@ -752,6 +768,7 @@ function renderEditor() {
     '<span class="meta num" style="color:var(--dim);font-size:13px;align-self:center;">#' + shortId(slip.id) + "　" + slip.time + "</span>" +
     "</div>";
 
+  if (slip.status === "staff") h += '<div class="warn" style="border-color:var(--ink);color:var(--ink);">賄いの記録です。食べた品を入れてください。売上には入らず、在庫だけ減ります。</div>';
   for (const w of warns) h += '<div class="warn">' + esc(w) + "</div>";
   if (slip.readFlags) for (const w of slip.readFlags) h += '<div class="warn">' + esc(w) + "</div>";
   if (!paid) h += '<button class="newslip" id="btnAddShot" style="background:#fff;color:var(--ink);border:1px solid var(--ink);font-size:15px;padding:10px;">📷 追加注文の紙を読み取り(この伝票に追記)</button>';
@@ -806,7 +823,11 @@ function renderEditor() {
   const total = slipTotal(slip);
   h += '<div class="edfoot"><div class="inner">' +
     '<div class="total">合計<b class="num">' + yen(total) + "</b></div>";
-  if (paid) {
+  if (slip.status === "staff") {
+    h += '<span style="font-size:13px;color:var(--dim);">賄い:売上にならず在庫だけ減ります</span>' +
+      '<button class="btn ghost" id="btnVoid">削除</button>' +
+      '<button class="btn primary" id="btnStaffDone">記録して戻る</button>';
+  } else if (paid) {
     h += '<button class="btn ghost" id="btnUnpay">会計取消</button>';
   } else {
     h += '<button class="btn ghost" id="btnVoid">伝票削除</button>' +
@@ -850,6 +871,8 @@ function renderEditor() {
     if (bv) bv.onclick = () => confirmDlg("この伝票を削除しますか?", () => {
       slip.status = "void"; save(); pushSlipNow(slip); view.mode = "list"; render();
     });
+    const bsd = document.getElementById("btnStaffDone");
+    if (bsd) bsd.onclick = () => { save(); pushSlipNow(slip); view.mode = "list"; render(); };
     const bp = document.getElementById("btnPay");
     if (bp) bp.onclick = () => { view.mode = "pay"; render(); };
   } else {
@@ -1092,13 +1115,22 @@ function renderClose() {
     for (const l of slipLines(s)) if (!l.name.startsWith("木琴蕎麦づくしコース")) counts[l.name] = (counts[l.name] || 0) + l.qty;
   }
 
-  const prep = DB.prep[D] || 0;
+  if (!DB.cashMoves) DB.cashMoves = {};
+  if (!DB.carry) DB.carry = {};
+  const prevCarryDate = Object.keys(DB.carry).filter(d => d < D).sort().pop();
+  const prevCarry = prevCarryDate ? DB.carry[prevCarryDate] : null;
+  const prepSet = DB.prep[D] != null && DB.prep[D] !== 0;
+  const prep = prepSet ? DB.prep[D] : (prevCarry || 0);
+  const moves = DB.cashMoves[D] || [];
+  const moveIn = moves.filter(m => m.amt > 0).reduce((a, m) => a + m.amt, 0);
+  const moveOut = moves.filter(m => m.amt < 0).reduce((a, m) => a - m.amt, 0);
   const DENOMS = [10000, 5000, 1000, 500, 100, 50, 10, 5, 1];
   if (!DB.denoms) DB.denoms = {};
   const dn = DB.denoms[D] || {};
   const counted = DENOMS.reduce((a, f) => a + f * (dn[f] || 0), 0);
-  const theory = prep + cash;
+  const theory = prep + cash + moveIn - moveOut;
   const diff = counted - theory;
+  const carryVal = DB.carry[D] != null ? DB.carry[D] : null;
 
   let h = '<div class="datepick"><span>対象日</span><select id="selDate">';
   const opts = dates.length ? dates : [today()];
@@ -1118,10 +1150,28 @@ function renderClose() {
     '<div class="kv"><span>現金</span><b class="num">' + yen(cash) + "</b></div>" +
     ((USE_QR || qr) ? '<div class="kv"><span>QR決済</span><b class="num">' + yen(qr) + "</b></div>" : "") +
     (openSlips.length ? '<div class="kv"><span class="warnv">未会計の伝票</span><b class="warnv num">' + openSlips.length + "件</b></div>" : "") +
+    (() => { const st = slips.filter(x => x.status === "staff"); if (!st.length) return "";
+      const n = st.reduce((a, x) => a + Object.values(x.items).reduce((p, q) => p + q, 0) + (x.course || 0), 0);
+      return '<div class="kv"><span>賄い(在庫のみ減・売上外)</span><b class="num">' + st.length + "件・" + n + "品</b></div>"; })() +
     "</div>";
 
+  /* 営業中の入出金 */
+  h += '<div class="close-sec"><h2>レジの入出金(' + D + ')</h2>';
+  if (!moves.length) h += '<div class="kv"><span style="color:var(--dim)">記録はありません</span><b></b></div>';
+  moves.forEach((m, i) => {
+    h += '<div class="kv"><span>' + esc(m.label) + ' <span style="color:var(--dim);font-size:12px;">' + (m.time || "") + "</span></span>" +
+      '<span><b class="num">' + (m.amt < 0 ? "−" + yen(-m.amt) : "+" + yen(m.amt)) + '</b>　<button data-rmmove="' + i + '" style="color:var(--shu);border:1px solid var(--rule);padding:2px 8px;font-size:12px;">取消</button></span></div>';
+  });
+  h += '<div style="padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
+    '<select id="mvKind" style="padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;">' +
+    '<option value="-1|仕入れ・立替の支払い">出金:仕入れ・立替</option><option value="-1|売上金の取り出し">出金:売上金の取り出し</option><option value="-1|その他の出金">出金:その他</option>' +
+    '<option value="1|両替・釣銭の補充">入金:両替・釣銭補充</option><option value="1|その他の入金">入金:その他</option></select>' +
+    '<input id="mvMemo" placeholder="メモ(任意)" style="flex:1;min-width:100px;padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;">' +
+    '<input id="mvAmt" class="num" inputmode="numeric" placeholder="円" style="width:100px;padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;text-align:right;">' +
+    '<button class="btn" id="btnMove">記録</button></div></div>';
+
   h += '<div class="close-sec"><h2>現金締め</h2>' +
-    '<div class="kv prep"><span>釣銭準備金</span><span><input id="inPrep" class="num" inputmode="numeric" value="' + (prep || "") + '" placeholder="0"> 円</span></div>' +
+    '<div class="kv prep"><span>釣銭準備金' + (!prepSet && prevCarry ? '<span style="display:block;font-size:11px;color:var(--dim);">前回の締めで残した額を自動で入れています</span>' : "") + '</span><span><input id="inPrep" class="num" inputmode="numeric" value="' + (prep || "") + '" placeholder="0"> 円</span></div>' +
     '<div class="denoms">';
   for (const f of DENOMS) {
     const c = dn[f] || 0;
@@ -1131,8 +1181,11 @@ function renderClose() {
   }
   h += "</div>" +
     '<div class="kv"><span>実査計(レジ内の現金)</span><b class="num">' + yen(counted) + "</b></div>" +
-    '<div class="kv"><span>理論在高(準備金+現金売上)</span><b class="num">' + yen(theory) + "</b></div>" +
-    '<div class="kv big"><span>差額</span><b class="num' + (diff !== 0 ? " warnv" : "") + '">' + (diff > 0 ? "+" : "") + yen(diff).replace("¥-", "−¥") + "</b></div></div>";
+    '<div class="kv"><span>理論在高(準備金+現金売上+入金−出金)</span><b class="num">' + yen(theory) + "</b></div>" +
+    '<div class="kv big"><span>差額</span><b class="num' + (diff !== 0 ? " warnv" : "") + '">' + (diff > 0 ? "+" : "") + yen(diff).replace("¥-", "−¥") + "</b></div>" +
+    '<div class="kv prep"><span>明日に残す釣銭<span style="display:block;font-size:11px;color:var(--dim);">次の営業日の釣銭準備金に自動で入ります</span></span><span><input id="inCarry" class="num" inputmode="numeric" value="' + (carryVal != null ? carryVal : "") + '" placeholder="0"> 円</span></div>' +
+    (carryVal != null ? '<div class="kv"><span>売上金として持ち出す額(実査計−残す釣銭)</span><b class="num">' + yen(Math.max(0, counted - carryVal)) + "</b></div>" : "") +
+    "</div>";
 
   h += '<div class="close-sec"><h2>出数</h2>';
   const keys = Object.keys(counts);
@@ -1207,6 +1260,26 @@ function renderClose() {
 
   main.innerHTML = h;
   document.getElementById("selDate").onchange = e => { view.closeDate = e.target.value; render(); };
+  const bmv = document.getElementById("btnMove");
+  if (bmv) bmv.onclick = () => {
+    const [sign, label] = document.getElementById("mvKind").value.split("|");
+    const memo = document.getElementById("mvMemo").value.trim();
+    const n = Number(document.getElementById("mvAmt").value.replace(/[^0-9]/g, ""));
+    if (!n) { alert("金額を入れてください"); return; }
+    if (!DB.cashMoves[D]) DB.cashMoves[D] = [];
+    DB.cashMoves[D].push({ label: label + (memo ? "(" + memo + ")" : ""), amt: n * Number(sign), time: nowTime() });
+    save(); queueOp("/meta", { k: "cash:" + D, v: JSON.stringify(DB.cashMoves[D]) }); render();
+  };
+  main.querySelectorAll("[data-rmmove]").forEach(el => el.onclick = () => confirmDlg("この入出金の記録を取り消しますか?", () => {
+    DB.cashMoves[D].splice(Number(el.dataset.rmmove), 1);
+    save(); queueOp("/meta", { k: "cash:" + D, v: JSON.stringify(DB.cashMoves[D]) }); render();
+  }));
+  const icar = document.getElementById("inCarry");
+  if (icar) icar.onchange = e => {
+    const v = e.target.value.replace(/[^0-9]/g, "");
+    if (v === "") delete DB.carry[D]; else DB.carry[D] = Number(v);
+    save(); queueOp("/meta", { k: "carry:" + D, v: v === "" ? "" : String(Number(v)) }); render();
+  };
   document.getElementById("inPrep").onchange = e => {
     DB.prep[D] = Number(e.target.value.replace(/[^0-9]/g, "")) || 0; save();
     schedulePushMeta("prep:" + D, () => String(DB.prep[D] || 0));
@@ -1357,7 +1430,11 @@ function downloadDaily(D, sales, cash, qr, counts, prep, counted, diff) {
   const guests = DB.slips.filter(s2 => s2.date === D && s2.status === "paid").reduce((a, s2) => a + (s2.people || 0), 0);
   const rows = [["日付", D], ["売上合計", sales], ["現金売上", cash], ["QR売上", qr],
     ["客数(人数記入分)", guests], ["客単価", guests > 0 ? Math.round(sales / guests) : ""],
-    ["釣銭準備金", prep], ["実査計", counted], ["差額", diff], [], ["品目", "出数"]];
+    ["釣銭準備金", prep], ["入金計", (DB.cashMoves && DB.cashMoves[D] || []).filter(m => m.amt > 0).reduce((a, m) => a + m.amt, 0)],
+    ["出金計", (DB.cashMoves && DB.cashMoves[D] || []).filter(m => m.amt < 0).reduce((a, m) => a - m.amt, 0)],
+    ["実査計", counted], ["差額", diff], ["明日に残す釣銭", DB.carry && DB.carry[D] != null ? DB.carry[D] : ""]];
+  for (const m of (DB.cashMoves && DB.cashMoves[D] || [])) rows.push(["入出金:" + m.label, m.amt]);
+  rows.push([], ["品目", "出数"]);
   for (const k in counts) rows.push([k, counts[k]]);
   rows.push([]);
   rows.push(["在庫品目", "区分", "本日入庫", "残"]);
@@ -1427,7 +1504,10 @@ function renderStock() {
   h += '</select>' +
     '<input id="inQty" class="num" inputmode="decimal" placeholder="数" style="flex:1;min-width:70px;padding:10px;font-size:18px;font-weight:700;color:var(--shu);border:1px solid var(--ink);background:#fff;text-align:right;">' +
     '<button class="btn primary" id="btnIntake">追加</button></div>' +
-    '<p style="color:var(--dim);font-size:12px;margin-top:8px;">毎朝仕込みの品は当日限り(翌日に持ち越しません)。繰越の品は残がそのまま明日に続きます。温かい蕎麦は温用麺から先に減り、尽きると細打ち麺から減ります(平日は温用麺0のままでOK)。</p>' +
+    '<div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:14px;">' +
+    '<label><input type="radio" name="inMode" value="add" checked> 入庫(数を足す)</label>' +
+    '<label><input type="radio" name="inMode" value="set"> 実数に合わせる(数えた数を入れる)</label></div>' +
+    '<p style="color:var(--dim);font-size:12px;margin-top:8px;">入れすぎた時は下の記録の「取消」、または「実数に合わせる」で実際に数えた数を入れると、差を自動で直します。毎朝仕込みの品は当日限り(翌日に持ち越しません)。繰越の品は残がそのまま明日に続きます。温かい蕎麦は温用麺から先に減り、尽きると細打ち麺から減ります(平日は温用麺0のままでOK)。</p>' +
     "</div></div>";
 
   /* 物販の品目管理 */
@@ -1461,22 +1541,36 @@ function renderStock() {
   }
   h += "</div>";
 
-  h += '<div class="close-sec"><h2>本日の入庫記録</h2>';
-  if (!intakeToday.length) h += '<div class="kv"><span style="color:var(--dim)">まだありません</span><b></b></div>';
-  for (const r of intakeToday) {
+  const since = (() => { const d = new Date(); d.setDate(d.getDate() - 6); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); })();
+  const recent = (DB.intake || []).filter(r => r.date >= since).sort((a, b) => b.ts - a.ts);
+  h += '<div class="close-sec"><h2>入庫の記録(直近7日・取消できます)</h2>';
+  if (!recent.length) h += '<div class="kv"><span style="color:var(--dim)">まだありません</span><b></b></div>';
+  for (const r of recent) {
     const it = stockById(r.item);
-    h += '<div class="kv"><span>' + esc(it ? it.name : r.item) + ' <span style="color:var(--dim);font-size:12px;">' + r.time + "</span></span>" +
-      '<span><b class="num">+' + fmtQty(r.qty) + "</b>　<button data-rmintake=\"" + r.ts + '" style="color:var(--shu);border:1px solid var(--rule);padding:2px 8px;font-size:12px;">取消</button></span></div>';
+    const daily = it && it.type === "daily";
+    h += '<div class="kv"><span>' + esc(it ? it.name : r.item) + ' <span style="color:var(--dim);font-size:12px;">' + (r.date === D ? "" : r.date.slice(5) + " ") + r.time + (r.note ? "・" + esc(r.note) : "") + "</span></span>" +
+      '<span><b class="num">' + (r.qty >= 0 ? "+" : "−") + fmtQty(Math.abs(r.qty)) + "</b>　" +
+      ((daily && r.date !== D) ? '<span style="color:var(--dim);font-size:12px;">当日限り</span>' :
+        '<button data-rmintake="' + r.ts + '" style="color:var(--shu);border:1px solid var(--rule);padding:2px 8px;font-size:12px;">取消</button>') + "</span></div>";
   }
   h += "</div>";
 
   main.innerHTML = h;
   document.getElementById("btnIntake").onclick = () => {
     const item = document.getElementById("inItem").value;
-    const q = parseFloat(document.getElementById("inQty").value);
-    if (!q || q <= 0) return;
+    const raw = parseFloat(document.getElementById("inQty").value);
+    const mode = (main.querySelector('input[name="inMode"]:checked') || {}).value || "add";
+    if (isNaN(raw) || raw < 0 || (mode === "add" && raw === 0)) return;
+    let q = raw, note = "";
+    if (mode === "set") {
+      const cur = stockBalances(today())[item] || 0;
+      q = raw - cur;
+      if (q === 0) { alert("すでに" + raw + "になっています"); return; }
+      note = "実数合わせ";
+    }
     if (!DB.intake) DB.intake = [];
     const rec = { ts: Date.now(), date: today(), time: nowTime(), item, qty: q };
+    if (note) rec.note = note;
     DB.intake.push(rec);
     save(); queueOp("/intake", { rec }); render();
   };
@@ -1524,10 +1618,10 @@ function renderStock() {
     r.retired = !r.retired;
     save(); queueOp("/meta", { k: "retail_custom", v: JSON.stringify(DB.retailCustom) }); render();
   });
-  main.querySelectorAll("[data-rmintake]").forEach(el => el.onclick = () => {
+  main.querySelectorAll("[data-rmintake]").forEach(el => el.onclick = () => confirmDlg("この入庫の記録を取り消しますか?", () => {
     DB.intake = DB.intake.filter(r => String(r.ts) !== el.dataset.rmintake);
     save(); queueOp("/intake/delete", { ts: el.dataset.rmintake }); render();
-  });
+  }));
 }
 
 /* ---- 読み取り結果の取り込み ---- */
