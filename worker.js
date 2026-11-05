@@ -12,7 +12,8 @@
  * ===== 写真保管(R2) =====
  * Settings → Bindings → Add → R2 bucket で変数名 PHOTOS にバケットを紐付けると、
  * 読み取った注文票の写真を自動保存する(電子帳簿保存の原始記録)。
- * GET /photo?key=...(&k=合言葉) で画像を取得。
+ * GET /photo?key=...(&k=合言葉) で画像を取得(締めの控え closings/... も同じ口で取得できる)。
+ * POST /snapshot {date, kind, files} で締めの控え(CSV・JSON)を closings/<date>/ に保存。
  *
  * ===== 共有台帳(D1) =====
  * Settings → Bindings → Add → D1 database で変数名 DB にデータベースを紐付けると、
@@ -155,6 +156,25 @@ export default {
       return new Response(obj.body, {
         headers: { "Content-Type": (obj.httpMetadata && obj.httpMetadata.contentType) || "image/jpeg", "Cache-Control": "private, max-age=86400", ...CORS },
       });
+    }
+    /* 締めの控え(R2): POST /snapshot {date, kind, files:{name:text}} → closings/<date>/<ts>-<kind>-<name> */
+    if (path === "/snapshot" && request.method === "POST") {
+      if (!env.PHOTOS) return json({ ok: false, error: "控えの保存先が未設定です(R2バインディングPHOTOSを追加してください)" }, 501);
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ ok: false, error: "JSONではありません" }, 400); }
+      const date = String(body.date || "").replace(/[^0-9-]/g, "");
+      const kind = String(body.kind || "close").replace(/[^a-z]/g, "") || "close";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json({ ok: false, error: "日付が不正です" }, 400);
+      const ts = Date.now();
+      const keys = [];
+      for (const name in (body.files || {})) {
+        const safe = name.replace(/[^a-zA-Z0-9_.-]/g, "");
+        const key = "closings/" + date + "/" + ts + "-" + kind + "-" + safe;
+        const type = safe.endsWith(".csv") ? "text/csv; charset=utf-8" : "application/json; charset=utf-8";
+        await env.PHOTOS.put(key, String(body.files[name]), { httpMetadata: { contentType: type } });
+        keys.push(key);
+      }
+      return json({ ok: true, keys });
     }
     if (path === "/state" || path === "/slip" || path === "/intake" || path === "/intake/delete" || path === "/meta") {
       return handleLedger(request, env, path);
