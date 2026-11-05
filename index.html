@@ -337,6 +337,14 @@ const STOCK_ITEMS = [
   { id: "S_EGG_PKG", name: "販売用卵(パック済)", unit: "個", type: "carry" },
 ];
 const STOCK_BY_ID = Object.fromEntries(STOCK_ITEMS.map(i => [i.id, i]));
+/* 画面から追加した物販品のうち「在庫を数える」品は、繰越型の在庫品目として自動で加わる */
+function allStockItems() {
+  const extra = (typeof DB !== "undefined" ? (DB.retailCustom || []) : [])
+    .filter(r => r.trackStock && r.stockId)
+    .map(r => ({ id: r.stockId, name: r.name, unit: r.unit || "個", type: "carry", custom: true, retired: !!r.retired }));
+  return STOCK_ITEMS.concat(extra);
+}
+function stockById(id) { return allStockItems().find(i => i.id === id); }
 
 /* メニュー→材料の対応表。"noodle"印の材料は盛り(1/1.5/2)で掛け算 */
 const SIZE_MULT = { a: 1, b: 1.5, c: 2, d: 1, e: 1.5, f: 2 };
@@ -352,10 +360,10 @@ const SOBA_RECIPE = {
   6: [["S_WARM", "noodle"], ["S_TSUYU", 1], ["S_TORORO", 1], ["S_EGG", 1]],// 山かけ(温)
 };
 const GOODS_RECIPE = {
-  G1: [["S_GOHAN", 1]], G2: [["S_DASHI", 1]], G3: [["S_GAKI", 1]],
+  G1: [["S_GOHAN", 1], ["S_EGG", 1]], G2: [["S_DASHI", 1]], G3: [["S_GAKI", 1]], // 蕎麦炊きご飯は生卵1個付き
   G4: [["S_ZENZAI", 1]], G5: [["S_EGG", 1]], G6: [["S_BEER", 1]], G7: [["S_NONAL", 1]],
 };
-const COURSE_RECIPE = [["S_GAKI", 1], ["S_GOHAN", 1], ["S_ZENZAI", 1]]; // コース1つあたり(蕎麦はコースの蕎麦セルで消費)
+const COURSE_RECIPE = [["S_GAKI", 1], ["S_GOHAN", 1], ["S_EGG", 1], ["S_ZENZAI", 1]]; // コース1つあたり(蕎麦炊きご飯の生卵1個を含む。蕎麦はコースの蕎麦セルで消費)
 
 /* 伝票1枚の材料消費 {itemId: qty} */
 function slipConsumption(slip) {
@@ -386,9 +394,11 @@ function slipConsumption(slip) {
 function stockBalances(dateStr) {
   const intake = DB.intake || [];
   const inSum = {};
-  for (const it of STOCK_ITEMS) inSum[it.id] = 0;
+  const SI = allStockItems();
+  const SB = Object.fromEntries(SI.map(i => [i.id, i]));
+  for (const it of SI) inSum[it.id] = 0;
   for (const rec of intake) {
-    const it = STOCK_BY_ID[rec.item];
+    const it = SB[rec.item];
     if (!it) continue;
     if (it.type === "daily" ? rec.date === dateStr : rec.date <= dateStr) inSum[rec.item] += rec.qty;
   }
@@ -397,7 +407,7 @@ function stockBalances(dateStr) {
     if (slip.status === "void") continue;
     const cons = slipConsumption(slip);
     for (const id in cons) {
-      const it = STOCK_BY_ID[id];
+      const it = SB[id];
       const isDaily = it ? it.type === "daily" : true; // S_WARM(擬似)は毎朝型扱い
       if (isDaily ? slip.date === dateStr : slip.date <= dateStr) consSum[id] = (consSum[id] || 0) + cons[id];
     }
@@ -408,8 +418,24 @@ function stockBalances(dateStr) {
   consSum["S_HOSO"] = (consSum["S_HOSO"] || 0) + (warm - fromAtsu);
   delete consSum["S_WARM"];
   const bal = {};
-  for (const it of STOCK_ITEMS) bal[it.id] = inSum[it.id] - (consSum[it.id] || 0);
+  for (const it of SI) bal[it.id] = inSum[it.id] - (consSum[it.id] || 0);
   return bal;
+}
+/* その日1日の入庫数と使用数(温メニューの麺は温用麺→細打ちの順に充当) */
+function dayFlow(dateStr) {
+  const inQ = {}, used = {};
+  for (const r of (DB.intake || [])) if (r.date === dateStr) inQ[r.item] = (inQ[r.item] || 0) + r.qty;
+  for (const slip of DB.slips) {
+    if (slip.status === "void" || slip.date !== dateStr) continue;
+    const c = slipConsumption(slip);
+    for (const id in c) used[id] = (used[id] || 0) + c[id];
+  }
+  const warm = used["S_WARM"] || 0;
+  const fromAtsu = Math.min(warm, inQ["S_ATSU"] || 0);
+  used["S_ATSU"] = (used["S_ATSU"] || 0) + fromAtsu;
+  used["S_HOSO"] = (used["S_HOSO"] || 0) + (warm - fromAtsu);
+  delete used["S_WARM"];
+  return { inQ, used };
 }
 function fmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(1); }
 
@@ -605,7 +631,7 @@ function slipWarnings(slip) {
   for (const k in slip.items) if (slip.items[k] >= QTY_FLAG) w.push("数量" + slip.items[k] + "の品があります。数の確認を");
   if (slip.status !== "paid") {
     const bal = stockBalances(slip.date);
-    const short = STOCK_ITEMS.filter(it => bal[it.id] < 0);
+    const short = allStockItems().filter(it => bal[it.id] < 0);
     for (const it of short) w.push("在庫不足: " + it.name + "(残 " + fmtQty(bal[it.id]) + it.unit + ")。仕込み入力か実物の確認を");
   }
   return w;
@@ -642,6 +668,7 @@ function render() {
   if (view.tab === "stock") { renderStock(); return; }
   if (view.mode === "edit") { renderEditor(); return; }
   if (view.mode === "pay") { renderPay(); return; }
+  if (view.mode === "split") { renderSplit(); return; }
   renderList();
 }
 
@@ -665,7 +692,7 @@ function renderList() {
     }
     h += '<button class="slipcard ' + (s.status === "paid" ? "paid" : "") + '" data-id="' + s.id + '">' +
       '<span class="tno num">卓 ' + esc(s.table || "−") + '</span>' +
-      '<span class="meta num">#' + shortId(s.id) + "　" + s.time + (s.pay ? "　" + s.pay : "") + elapsed + "</span>" +
+      '<span class="meta num">#' + shortId(s.id) + "　" + s.time + (s.pay ? "　" + s.pay : "") + ((s.splitFrom || (s.splitTo && s.splitTo.length)) ? "　別会計" : "") + elapsed + "</span>" +
       '<span class="st ' + s.status + '">' + (s.status === "paid" ? "会計済" : "未会計") + "</span>" +
       '<span class="amt num">' + yen(t) + "</span></button>";
   }
@@ -706,7 +733,7 @@ function renderEditor() {
 
   let h = '<div class="ed-top">' +
     '<button class="back" id="btnBack">◀ 一覧</button>' +
-    '<div class="tablepick"><span class="lbl">卓番号</span><input id="inTable" class="num" inputmode="numeric" value="' + esc(slip.table) + '"' + (paid ? " disabled" : "") + "></div>" +
+    '<div class="tablepick"><span class="lbl">卓番号</span><input id="inTable" class="num" inputmode="numeric" autocomplete="off" value="' + esc(slip.table) + '"' + (paid ? " disabled" : "") + "></div>" +
     '<div class="tablepick" style="margin-left:8px;"><span class="lbl">人数</span><input id="inPeople" class="num" inputmode="numeric" style="width:56px;" value="' + (slip.people || "") + '"' + (paid ? " disabled" : "") + ' placeholder="−"></div>' +
     '<div class="sp"></div>' +
     '<span class="meta num" style="color:var(--dim);font-size:13px;align-self:center;">#' + shortId(slip.id) + "　" + slip.time + "</span>" +
@@ -836,6 +863,94 @@ function bump(slip, key, dir) {
   save(); schedulePushSlip(slip); render();
 }
 
+/* ---- 別会計(伝票の分割) ---- */
+function itemLabel(key) {
+  if (/^B\d+$/.test(key)) { const r = allRetail().find(x => x.id === key); return "物販 " + (r ? r.name : key); }
+  if (/^G\d$/.test(key)) { const g = GOODS.find(x => x.id === key); return g ? g.name : key; }
+  const row = Number(key[0]), col = key[1];
+  const sb = SOBA.find(x => x.row === row);
+  return (sb ? sb.name : key) + "・" + SIZE_NAME[col] + ("def".includes(col) ? "(コース)" : "");
+}
+function renderSplit() {
+  const slip = findSlip(view.slipId);
+  if (!slip) { view.mode = "list"; renderList(); return; }
+  const sel = view.splitSel || (view.splitSel = { items: {}, C: 0, adj: {}, people: 1 });
+  let h = '<div class="ed-top"><button class="back" id="btnBack">◀ 会計に戻る</button>' +
+    '<div class="sp"></div><span style="font-size:15px;align-self:center;">卓 <b class="num">' + esc(slip.table || "−") + "</b>　#" + shortId(slip.id) + "</span></div>";
+  h += '<div class="warn" style="border-color:var(--ink);color:var(--ink);">別会計にする分だけ、数を選んでください。選んだ品が新しい伝票に移ります(残りはこの伝票のまま)。</div>';
+  h += '<section class="block"><h2>移す品を選ぶ</h2>';
+  if (slip.course) {
+    h += '<div class="courserow"><div class="nm">木琴蕎麦づくしコース<small>この伝票に ' + slip.course + "</small></div>" +
+      '<div class="stepper"><button data-sp="C" data-dir="-1">−</button><span class="val num ' + (sel.C ? "set" : "zero") + '">' + sel.C + '</span><button data-sp="C" data-dir="1">＋</button></div></div>';
+  }
+  for (const key of Object.keys(slip.items)) {
+    const have = slip.items[key], v = sel.items[key] || 0;
+    h += '<div class="courserow" style="border-top:1px solid var(--rule);"><div class="nm">' + esc(itemLabel(key)) + "<small>この伝票に " + have + "</small></div>" +
+      '<div class="stepper"><button data-sp="' + key + '" data-dir="-1">−</button><span class="val num ' + (v ? "set" : "zero") + '">' + v + '</span><button data-sp="' + key + '" data-dir="1">＋</button></div></div>';
+  }
+  (slip.adjust || []).forEach((a, i) => {
+    h += '<div class="courserow" style="border-top:1px solid var(--rule);"><div class="nm">調整 ' + esc(a.label) + "<small>" + (a.amt < 0 ? "−" + yen(-a.amt) : "+" + yen(a.amt)) + "</small></div>" +
+      '<button data-spadj="' + i + '" class="btn' + (sel.adj[i] ? " primary" : "") + '" style="padding:8px 12px;">' + (sel.adj[i] ? "移す" : "移さない") + "</button></div>";
+  });
+  h += "</section>";
+
+  // preview
+  const moved = { course: sel.C, items: {}, adjust: [] };
+  for (const k in sel.items) if (sel.items[k]) moved.items[k] = sel.items[k];
+  (slip.adjust || []).forEach((a, i) => { if (sel.adj[i]) moved.adjust.push(a); });
+  const movedTotal = slipTotal(moved);
+  const remain = slipTotal(slip) - movedTotal;
+  h += '<section class="block"><h2>分けたあと</h2>' +
+    '<div class="courserow"><div class="nm">新しい伝票(別会計)</div><b class="num" style="font-size:20px;">' + yen(movedTotal) + "</b></div>" +
+    '<div class="courserow" style="border-top:1px solid var(--rule);"><div class="nm">この伝票に残る分</div><b class="num" style="font-size:20px;">' + yen(remain) + "</b></div>" +
+    '<div class="courserow" style="border-top:1px solid var(--rule);"><div class="nm">新しい伝票の人数</div>' +
+    '<div class="stepper"><button data-sp="P" data-dir="-1">−</button><span class="val num set">' + sel.people + '</span><button data-sp="P" data-dir="1">＋</button></div></div>' +
+    "</section>";
+  const any = movedTotal !== 0 || sel.C > 0 || Object.keys(moved.items).length > 0;
+  h += '<div class="edfoot"><div class="inner"><div class="total">別会計<b class="num">' + yen(movedTotal) + "</b></div>" +
+    '<button class="btn primary" id="btnDoSplit"' + (any ? "" : " disabled") + ">この分を別会計にする</button></div></div>";
+  main.innerHTML = h;
+
+  document.getElementById("btnBack").onclick = () => { view.mode = "pay"; render(); };
+  main.querySelectorAll("[data-sp]").forEach(el => el.onclick = () => {
+    const k = el.dataset.sp, d = Number(el.dataset.dir);
+    if (k === "C") sel.C = Math.max(0, Math.min(slip.course || 0, sel.C + d));
+    else if (k === "P") sel.people = Math.max(0, sel.people + d);
+    else sel.items[k] = Math.max(0, Math.min(slip.items[k] || 0, (sel.items[k] || 0) + d));
+    render();
+  });
+  main.querySelectorAll("[data-spadj]").forEach(el => el.onclick = () => {
+    const i = el.dataset.spadj; sel.adj[i] = !sel.adj[i]; render();
+  });
+  const bd = document.getElementById("btnDoSplit");
+  if (bd) bd.onclick = () => {
+    if (bd.disabled) return;
+    const child = {
+      id: genId(), date: slip.date, time: slip.time, table: slip.table, status: "open",
+      people: sel.people, course: sel.C, items: {}, adjust: [], pay: null, tendered: null,
+      splitFrom: slip.id, photos: (slip.photos || []).slice(),
+    };
+    for (const k in sel.items) {
+      const q = sel.items[k] || 0;
+      if (!q) continue;
+      child.items[k] = q;
+      slip.items[k] -= q;
+      if (slip.items[k] <= 0) delete slip.items[k];
+    }
+    slip.course = (slip.course || 0) - sel.C;
+    const keep = [];
+    (slip.adjust || []).forEach((a, i) => { if (sel.adj[i]) child.adjust.push(a); else keep.push(a); });
+    slip.adjust = keep;
+    if (slip.people && sel.people) slip.people = Math.max(0, slip.people - sel.people);
+    slip.tendered = null;
+    (slip.splitTo = slip.splitTo || []).push(child.id);
+    DB.slips.push(child);
+    save(); pushSlipNow(slip); pushSlipNow(child);
+    view = { ...view, mode: "pay", slipId: child.id, splitSel: null };
+    render();
+  };
+}
+
 /* ---- 会計 ---- */
 function renderPay() {
   const slip = findSlip(view.slipId);
@@ -851,7 +966,15 @@ function renderPay() {
   for (const l of lines) {
     h += '<div class="row"><span>' + esc(l.name) + ' <span class="q num">×' + l.qty + "</span></span><span class=\"num\">" + yen(l.amt) + "</span></div>";
   }
-  h += '<div class="row total"><span>合計</span><span class="num">' + yen(total) + "</span></div></div>";
+  h += '<div class="row total"><span>合計</span><span class="num">' + yen(total) + "</span></div>";
+  if ((slip.people || 0) >= 2) {
+    const per = Math.ceil(total / slip.people / 10) * 10;
+    const last = total - per * (slip.people - 1);
+    h += '<div class="row sub"><span>割り勘(' + slip.people + '人)</span><span class="num">1人 ' + yen(per) +
+      (last !== per ? "(最後の1人 " + yen(last) + ")" : "") + "</span></div>";
+  }
+  h += "</div>";
+  h += '<button class="newslip" id="btnSplit" style="background:#fff;color:var(--ink);border:1px solid var(--ink);font-size:15px;padding:10px;">別会計に分ける(品を選んで別の伝票へ)</button>';
 
   /* 調整(値引き・追加料金) */
   h += '<div class="tender"><div style="font-weight:700;margin-bottom:8px;">調整(値引き・追加)</div>';
@@ -897,6 +1020,8 @@ function renderPay() {
 
   main.innerHTML = h;
   document.getElementById("btnBack").onclick = () => { view.mode = "edit"; render(); };
+  const bsp = document.getElementById("btnSplit");
+  if (bsp) bsp.onclick = () => { view.mode = "split"; view.splitSel = { items: {}, C: 0, adj: {}, people: 1 }; render(); };
   const afterAdj = () => { slip.tendered = null; save(); pushSlipNow(slip); render(); };
   main.querySelectorAll("[data-preset]").forEach(el => el.onclick = () => {
     const p = ADJUST_PRESETS[Number(el.dataset.preset)];
@@ -1221,7 +1346,7 @@ function downloadDaily(D, sales, cash, qr, counts, prep, counted, diff) {
   rows.push([]);
   rows.push(["在庫品目", "区分", "本日入庫", "残"]);
   const bal = stockBalances(D);
-  for (const it of STOCK_ITEMS) {
+  for (const it of allStockItems()) {
     const inQ = (DB.intake || []).filter(r => r.date === D && r.item === it.id).reduce((a, r) => a + r.qty, 0);
     rows.push([it.name, it.type === "daily" ? "毎朝" : "繰越", inQ, bal[it.id]]);
   }
@@ -1243,13 +1368,20 @@ function renderStock() {
   const bal = stockBalances(D);
   const intakeToday = (DB.intake || []).filter(r => r.date === D);
 
-  let h = '<div class="close-sec"><h2>本日の残(' + D + ')</h2>';
-  for (const it of STOCK_ITEMS) {
+  const flow = dayFlow(D);
+  let h = '<div class="close-sec"><h2>在庫(' + D + ')</h2>' +
+    '<div class="kv" style="font-size:12px;color:var(--dim);padding-top:6px;padding-bottom:6px;"><span>品目</span>' +
+    '<span style="display:flex;gap:0;"><span style="width:58px;text-align:right;">本日入庫</span><span style="width:58px;text-align:right;">本日使用</span><span style="width:84px;text-align:right;">残</span></span></div>';
+  for (const it of allStockItems().filter(i => !i.retired)) {
     const b = bal[it.id];
-    const warn = b <= 0 ? ' class="warnv"' : "";
+    const inq = flow.inQ[it.id] || 0, used = flow.used[it.id] || 0;
+    const warn = b <= 0 ? "color:var(--shu);" : "";
     h += '<div class="kv"><span>' + esc(it.name) +
-      ' <span style="color:var(--dim);font-size:12px;">' + (it.type === "daily" ? "毎朝仕込み" : "繰越") + "</span></span>" +
-      "<b" + warn + ' class="num">' + fmtQty(b) + " " + it.unit + "</b></div>";
+      ' <span style="color:var(--dim);font-size:11px;display:block;">' + (it.type === "daily" ? "毎朝仕込み" : "繰越") + "</span></span>" +
+      '<span style="display:flex;align-items:baseline;">' +
+      '<span class="num" style="width:58px;text-align:right;color:var(--dim);">' + (inq ? "+" + fmtQty(inq) : "−") + "</span>" +
+      '<span class="num" style="width:58px;text-align:right;color:var(--dim);">' + (used ? fmtQty(used) : "−") + "</span>" +
+      '<b class="num" style="width:84px;text-align:right;font-size:18px;' + warn + '">' + fmtQty(b) + '<span style="font-size:12px;font-weight:400;"> ' + it.unit + "</span></b></span></div>";
   }
   h += '</div>';
 
@@ -1275,7 +1407,7 @@ function renderStock() {
   h += '<div class="close-sec"><h2>仕込み・入庫を記録</h2><div style="padding:10px 12px;">' +
     '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
     '<select id="inItem" style="flex:2;min-width:160px;padding:10px;font-size:16px;border:1px solid var(--ink);background:#fff;">';
-  for (const it of STOCK_ITEMS) h += '<option value="' + it.id + '">' + esc(it.name) + "(" + it.unit + ")</option>";
+  for (const it of allStockItems().filter(i => !i.retired)) h += '<option value="' + it.id + '">' + esc(it.name) + "(" + it.unit + ")</option>";
   h += '</select>' +
     '<input id="inQty" class="num" inputmode="decimal" placeholder="数" style="flex:1;min-width:70px;padding:10px;font-size:18px;font-weight:700;color:var(--shu);border:1px solid var(--ink);background:#fff;text-align:right;">' +
     '<button class="btn primary" id="btnIntake">追加</button></div>' +
@@ -1292,8 +1424,12 @@ function renderStock() {
     '<option value="own">自社品</option><option value="consign">委託(手数料をもらう)</option><option value="supply">仕入(買取済み)</option></select>' +
     '<input id="rPartner" placeholder="相手の名前" style="flex:1;min-width:110px;padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;">' +
     '<input id="rRate" class="num" inputmode="numeric" placeholder="率%" style="width:70px;padding:10px;font-size:15px;border:1px solid var(--ink);background:#fff;text-align:right;">' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:15px;flex-wrap:wrap;">' +
+    '<label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="rTrack" style="width:20px;height:20px;"> 在庫を数える</label>' +
+    '<input id="rUnit" placeholder="単位(個・パック等)" style="flex:1;min-width:120px;max-width:170px;padding:8px;font-size:15px;border:1px solid var(--ink);background:#fff;">' +
     '<button class="btn primary" id="btnRetailAdd">追加</button></div>' +
-    '<p style="color:var(--dim);font-size:12px;margin-top:8px;">率%は、委託=手数料率(例10)、仕入=仕入掛率(例60=6掛け)。自社品は相手と率は空欄のまま。追加した品は全端末の物販に即反映されます。在庫数の管理が必要な品は開発側で追加するので相談してください。</p>' +
+    '<p style="color:var(--dim);font-size:12px;margin-top:8px;">率%は、委託=手数料率(例10)、仕入=仕入掛率(例60=6掛け)。自社品は相手と率は空欄のまま。追加した品は全端末の物販に即反映されます。「在庫を数える」にした品は、在庫タブの「仕込み・入庫を記録」で入荷数を入れると「あと何個」が出ます。</p>' +
     "</div>";
   const customs = DB.retailCustom || [];
   if (customs.length) {
@@ -1301,8 +1437,10 @@ function renderStock() {
       h += '<div class="kv"><span>' + esc(r.name) + ' <span style="color:var(--dim);font-size:12px;">' + yen(r.price) +
         (r.consignor ? "・委託:" + esc(r.consignor) + "(" + Math.round((r.feeRate ?? 0.1) * 100) + "%)" : "") +
         (r.supplier ? "・仕入:" + esc(r.supplier) + "(" + Math.round((r.costRate ?? 0.6) * 100) + "%)" : "") +
+        (r.trackStock ? "・在庫" + esc(r.unit || "個") + "で管理" : "") +
         (r.retired ? "・販売終了" : "") + "</span></span>" +
-        '<button data-retire="' + r.id + '" style="color:var(--shu);border:1px solid var(--rule);padding:2px 8px;font-size:12px;">' + (r.retired ? "販売再開" : "販売終了") + "</button></div>";
+        '<span style="white-space:nowrap;"><button data-track="' + r.id + '" style="border:1px solid var(--rule);padding:2px 8px;font-size:12px;margin-right:4px;">' + (r.trackStock ? "在庫を数えない" : "在庫を数える") + "</button>" +
+        '<button data-retire="' + r.id + '" style="color:var(--shu);border:1px solid var(--rule);padding:2px 8px;font-size:12px;">' + (r.retired ? "販売再開" : "販売終了") + "</button></span></div>";
     }
   }
   h += "</div>";
@@ -1310,7 +1448,7 @@ function renderStock() {
   h += '<div class="close-sec"><h2>本日の入庫記録</h2>';
   if (!intakeToday.length) h += '<div class="kv"><span style="color:var(--dim)">まだありません</span><b></b></div>';
   for (const r of intakeToday) {
-    const it = STOCK_BY_ID[r.item];
+    const it = stockById(r.item);
     h += '<div class="kv"><span>' + esc(it ? it.name : r.item) + ' <span style="color:var(--dim);font-size:12px;">' + r.time + "</span></span>" +
       '<span><b class="num">+' + fmtQty(r.qty) + "</b>　<button data-rmintake=\"" + r.ts + '" style="color:var(--shu);border:1px solid var(--rule);padding:2px 8px;font-size:12px;">取消</button></span></div>';
   }
@@ -1336,12 +1474,34 @@ function renderStock() {
     if (!name || !price) { alert("品名と価格を入れてください"); return; }
     if (kind !== "own" && !partner) { alert("委託・仕入の品は相手の名前を入れてください"); return; }
     const item = { id: nextRetailId(), name, price, stock: [] };
+    if (document.getElementById("rTrack").checked) {
+      item.trackStock = true;
+      item.stockId = "S_" + item.id;
+      item.unit = document.getElementById("rUnit").value.trim() || "個";
+      item.stock = [[item.stockId, 1]];
+    }
     if (kind === "consign") { item.consignor = partner; item.feeRate = (rate || 10) / 100; }
     if (kind === "supply") { item.supplier = partner; item.costRate = (rate || 60) / 100; }
     if (!DB.retailCustom) DB.retailCustom = [];
     DB.retailCustom.push(item);
     save(); queueOp("/meta", { k: "retail_custom", v: JSON.stringify(DB.retailCustom) }); render();
   };
+  main.querySelectorAll("[data-track]").forEach(el => el.onclick = () => {
+    const r = (DB.retailCustom || []).find(x => x.id === el.dataset.track);
+    if (!r) return;
+    if (r.trackStock) {
+      if (!confirm(r.name + " の在庫を数えるのをやめますか?(入庫の記録は残ります)")) return;
+      r.trackStock = false; r.stock = [];
+    } else {
+      const unit = prompt("数える単位は?(例: 個、パック、本)", r.unit || "個");
+      if (unit === null) return;
+      r.trackStock = true;
+      r.stockId = r.stockId || ("S_" + r.id);
+      r.unit = unit.trim() || "個";
+      r.stock = [[r.stockId, 1]];
+    }
+    save(); queueOp("/meta", { k: "retail_custom", v: JSON.stringify(DB.retailCustom) }); render();
+  });
   main.querySelectorAll("[data-retire]").forEach(el => el.onclick = () => {
     const r = (DB.retailCustom || []).find(x => x.id === el.dataset.retire);
     if (!r) return;
@@ -1574,7 +1734,7 @@ render();
 fetchState().then(() => render());
 setInterval(() => {
   if (document.visibilityState !== "visible") return;
-  if (view.mode === "edit" || view.mode === "pay") return;
+  if (view.mode === "edit" || view.mode === "pay" || view.mode === "split") return;
   if ((dlgSettings && dlgSettings.open) || (dlgPaste && dlgPaste.open) || (dlg && dlg.open)) return;
   fetchState().then(() => render());
 }, 25000);
