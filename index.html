@@ -185,6 +185,9 @@
   .denom { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
   .denom .face { width: 90px; font-size: 15px; }
   .denom .amt { width: 110px; text-align: right; font-size: 15px; color: var(--dim); }
+  .denom input.dnq { width: 88px; padding: 8px 10px; font-size: 22px; font-weight: 700; text-align: right;
+    border: 1px solid var(--ink); background: #fff; color: var(--shu); border-radius: 0; }
+  .denom input.dnq::placeholder { color: var(--rule); font-weight: 400; }
   .prep input { width: 130px; text-align: right; font-size: 20px; font-weight: 700; border: none; border-bottom: 2px solid var(--ink); background: transparent; outline: none; color: var(--shu); }
   .csvbtns { display: flex; gap: 10px; margin: 16px 0 6px; }
   .csvbtns .btn { flex: 1; }
@@ -1289,15 +1292,15 @@ function renderClose() {
   for (const f of DENOMS) {
     const c = dn[f] || 0;
     h += '<div class="denom"><span class="face num">' + f.toLocaleString() + "円</span>" +
-      '<div class="stepper"><button data-dn="' + f + '" data-dir="-1">−</button><span class="val num ' + (c ? "set" : "zero") + '">' + c + '</span><button data-dn="' + f + '" data-dir="1">＋</button></div>' +
-      '<span class="amt num">' + yen(f * c) + "</span></div>";
+      '<span><input class="dnq num" data-dnq="' + f + '" type="text" inputmode="numeric" pattern="[0-9]*" enterkeyhint="next" value="' + (c || "") + '" placeholder="0"> 枚</span>' +
+      '<span class="amt num" id="dnAmt' + f + '">' + yen(f * c) + "</span></div>";
   }
   h += "</div>" +
-    '<div class="kv"><span>実査計(レジ内の現金)</span><b class="num">' + yen(counted) + "</b></div>" +
+    '<div class="kv"><span>実査計(レジ内の現金)</span><b class="num" id="dnCounted">' + yen(counted) + "</b></div>" +
     '<div class="kv"><span>理論在高(準備金+現金売上+入金−出金)</span><b class="num">' + yen(theory) + "</b></div>" +
-    '<div class="kv big"><span>差額</span><b class="num' + (diff !== 0 ? " warnv" : "") + '">' + (diff > 0 ? "+" : "") + yen(diff).replace("¥-", "−¥") + "</b></div>" +
+    '<div class="kv big"><span>差額</span><b class="num' + (diff !== 0 ? " warnv" : "") + '" id="dnDiff">' + (diff > 0 ? "+" : "") + yen(diff).replace("¥-", "−¥") + "</b></div>" +
     '<div class="kv prep"><span>明日に残す釣銭<span style="display:block;font-size:11px;color:var(--dim);">次の営業日の釣銭準備金に自動で入ります</span></span><span><input id="inCarry" class="num" inputmode="numeric" value="' + (carryVal != null ? carryVal : "") + '" placeholder="0"> 円</span></div>' +
-    (carryVal != null ? '<div class="kv"><span>売上金として持ち出す額(実査計−残す釣銭)</span><b class="num">' + yen(Math.max(0, counted - carryVal)) + "</b></div>" : "") +
+    (carryVal != null ? '<div class="kv"><span>売上金として持ち出す額(実査計−残す釣銭)</span><b class="num" id="dnOut">' + yen(Math.max(0, counted - carryVal)) + "</b></div>" : "") +
     "</div>";
 
   h += '<div class="close-sec"><h2>出数</h2>';
@@ -1416,13 +1419,35 @@ function renderClose() {
     schedulePushMeta("prep:" + D, () => String(DB.prep[D] || 0));
     render();
   };
-  main.querySelectorAll("[data-dn]").forEach(el => el.onclick = () => {
-    const f = el.dataset.dn;
-    if (!DB.denoms[D]) DB.denoms[D] = {};
-    DB.denoms[D][f] = Math.max(0, (DB.denoms[D][f] || 0) + Number(el.dataset.dir));
-    save();
-    schedulePushMeta("denoms:" + D, () => JSON.stringify(DB.denoms[D] || {}));
-    render();
+  /* 金種の枚数:数字を直接入力。打つたびに合計・差額をその場で更新(画面を描き直さないのでキーボードが閉じない) */
+  const dnInputs = Array.from(main.querySelectorAll("[data-dnq]"));
+  dnInputs.forEach((el, i) => {
+    if (isLocked(D)) el.disabled = true;
+    el.onfocus = () => el.select();
+    el.oninput = () => {
+      const v = el.value.replace(/[^0-9]/g, "");
+      if (v !== el.value) el.value = v;
+      const f = el.dataset.dnq;
+      if (!DB.denoms[D]) DB.denoms[D] = {};
+      if (v === "") delete DB.denoms[D][f]; else DB.denoms[D][f] = Number(v);
+      save();
+      schedulePushMeta("denoms:" + D, () => JSON.stringify(DB.denoms[D] || {}));
+      const cnt = DENOMS.reduce((a, x) => a + x * ((DB.denoms[D] || {})[x] || 0), 0);
+      const df = cnt - theory;
+      document.getElementById("dnAmt" + f).textContent = yen(Number(f) * (Number(v) || 0));
+      document.getElementById("dnCounted").textContent = yen(cnt);
+      const de = document.getElementById("dnDiff");
+      de.textContent = (df > 0 ? "+" : "") + yen(df).replace("¥-", "−¥");
+      de.classList.toggle("warnv", df !== 0);
+      const oe = document.getElementById("dnOut");
+      if (oe && carryVal != null) oe.textContent = yen(Math.max(0, cnt - carryVal));
+    };
+    el.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); const nx = dnInputs[i + 1]; if (nx) nx.focus(); else el.blur(); } };
+    // 金種の欄から完全に離れたら描き直す(締めの確定ボタン等が最新の差額を使うように)。欄から欄への移動では描き直さない
+    el.onblur = () => setTimeout(() => {
+      const a = document.activeElement;
+      if (!(a && a.dataset && a.dataset.dnq) && view.tab === "close") render();
+    }, 50);
   });
   const sau = document.getElementById("selAggUnit");
   if (sau) sau.onchange = e => { view.aggUnit = e.target.value; view.aggKey = null; render(); };
