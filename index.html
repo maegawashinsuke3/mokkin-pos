@@ -607,7 +607,7 @@ function remoteOn() { const c = loadCfg(); return !!c.readerUrl; }
 function setSync(ok, msg) {
   const el = document.getElementById("syncDot");
   if (!el) return;
-  if (!remoteOn()) { el.textContent = ""; return; }
+  if (!remoteOn()) { el.textContent = "共有なし"; el.style.color = "var(--shu)"; el.title = "この端末は共有台帳につながっていません(設定でサーバーURLと合言葉を入れてください)"; return; }
   if (ok) { el.textContent = "共有✓"; el.style.color = "var(--dim)"; }
   else { el.textContent = "未同期"; el.style.color = "var(--shu)"; el.title = msg || ""; }
 }
@@ -662,7 +662,7 @@ function schedulePushMeta(k, getVal) {
   _metaTimers[k] = setTimeout(() => queueOp("/meta", { k, v: getVal() }), 700);
 }
 async function fetchState() {
-  if (!remoteOn()) return;
+  if (!remoteOn()) { setSync(false); return; }
   await flushPending();
   if (DB.pending && DB.pending.length) return; // 未送信が残るうちは上書きしない
   try {
@@ -1469,6 +1469,8 @@ function renderClose() {
   const bl = document.getElementById("btnLock");
   if (bl) bl.onclick = () => {
     if (openSlips.length) { alert("未会計の伝票が " + openSlips.length + " 件あります。会計するか削除してから確定してください。"); return; }
+    if (!remoteOn()) { alert("この端末は共有台帳につながっていないため、締めを確定できません。\n右上の「設定」でサーバーURLと合言葉を入れてから、もう一度押してください。"); return; }
+    if (DB.pending && DB.pending.length) { alert("まだ共有台帳に送れていない記録が " + DB.pending.length + " 件あります(右上が「未同期」)。\n通信と「設定」の合言葉を確認して、「共有✓」になってから確定してください。"); flushPending(); return; }
     confirmDlg(D + " の締めを確定しますか?(売上 " + yen(sales) + "・差額 " + (diff > 0 ? "+" : "") + yen(diff) + ")", async () => {
       if (!DB.locks) DB.locks = {};
       const files = {
@@ -1972,14 +1974,36 @@ function openSettings() {
   dlgSettings.showModal();
 }
 document.getElementById("setNo").onclick = () => dlgSettings.close();
+/* 共有台帳につながっていなかった端末をつないだ時、この端末だけにある記録を先に送る
+   (送らずに読み込むと、共有台帳の内容で上書きされてこの端末の伝票が消えるため) */
+function queueLocalUpload() {
+  const n0 = (DB.pending || []).length;
+  for (const sl of (DB.slips || [])) queueOpNoFlush("/slip", { slip: cleanSlip(sl) });
+  for (const r of (DB.intake || [])) queueOpNoFlush("/intake", { rec: r });
+  for (const d in (DB.prep || {})) queueOpNoFlush("/meta", { k: "prep:" + d, v: String(DB.prep[d] || 0) });
+  for (const d in (DB.denoms || {})) queueOpNoFlush("/meta", { k: "denoms:" + d, v: JSON.stringify(DB.denoms[d] || {}) });
+  for (const d in (DB.cashMoves || {})) queueOpNoFlush("/meta", { k: "cash:" + d, v: JSON.stringify(DB.cashMoves[d] || []) });
+  for (const d in (DB.carry || {})) queueOpNoFlush("/meta", { k: "carry:" + d, v: String(DB.carry[d]) });
+  for (const d in (DB.locks || {})) queueOpNoFlush("/meta", { k: "lock:" + d, v: JSON.stringify(DB.locks[d]) });
+  for (const d in (DB.lockHist || {})) queueOpNoFlush("/meta", { k: "lockhist:" + d, v: JSON.stringify(DB.lockHist[d] || []) });
+  save();
+  return (DB.pending || []).length - n0;
+}
+function queueOpNoFlush(path, body) { if (!DB.pending) DB.pending = []; DB.pending.push({ path, body }); }
 document.getElementById("setYes").onclick = () => {
   const c = loadCfg();
+  const wasOff = !c.readerUrl;
   c.readerUrl = document.getElementById("inReader").value.trim();
   c.appKey = document.getElementById("inAppKey").value.trim();
   const pin = document.getElementById("inPin").value.trim();
   if (pin && !/^[A-Za-z0-9]{4,12}$/.test(pin)) { alert("パスワードは英数字4〜12文字にしてください"); return; }
   c.pin = pin;
-  saveCfg(c); dlgSettings.close(); render();
+  saveCfg(c); dlgSettings.close();
+  if (wasOff && c.readerUrl && ((DB.slips || []).length || (DB.intake || []).length)) {
+    const n = queueLocalUpload();
+    if (n) alert("この端末だけにあった記録(伝票 " + (DB.slips || []).length + " 件など)を共有台帳に送ります。");
+  }
+  render();
   refreshSoon();
 };
 
