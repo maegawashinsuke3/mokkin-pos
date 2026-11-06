@@ -215,7 +215,7 @@
 </div>
 
 <dialog id="dlg">
-  <p id="dlgMsg"></p>
+  <p id="dlgMsg" style="white-space:pre-line;"></p>
   <div class="dlgbtns">
     <button class="btn ghost" id="dlgNo">やめる</button>
     <button class="btn primary" id="dlgYes">実行する</button>
@@ -325,11 +325,13 @@ const ADJUST_PRESETS = [
 ];
 
 /* ===== 在庫マスタ =====
-   type: "daily"=毎朝仕込み(当日限り) / "carry"=繰越(残が翌日に持ち越し) */
+   type: "daily"=毎朝仕込み(当日限り) / "carry"=繰越(残が翌日に持ち越し)
+         "left"=3日目の麺(温用)。冷・釜揚げに使える日を過ぎた麺(noodleSimが計算。2026-11-06) */
 const STOCK_ITEMS = [
   { id: "S_HOSO",   name: "細打ち麺",   unit: "玉",  type: "daily" },
   { id: "S_ATSU",   name: "温用麺(助っ人打ち)", unit: "玉", type: "daily" },
   { id: "S_HIRA",   name: "平打ち麺(釜揚げ用)", unit: "玉", type: "daily" },
+  { id: "S_NOKORI", name: "3日目の麺(温用)", unit: "玉", type: "left" }, // 冷に使える日を過ぎて温蕎麦専用になった麺(noodleSimが計算)
   { id: "S_TSUYU",  name: "温つゆ",     unit: "杯",  type: "daily" },
   { id: "S_GOHAN",  name: "蕎麦炊きご飯(浸水)", unit: "食", type: "daily" },
   { id: "S_NIRA",   name: "ニラ",       unit: "人前", type: "carry" },
@@ -361,9 +363,9 @@ function stockById(id) { return allStockItems().find(i => i.id === id); }
 
 /* メニュー→材料の対応表。"noodle"印の材料は盛り(1/1.5/2)で掛け算 */
 const SIZE_MULT = { a: 1, b: 1.5, c: 2, d: 1, e: 1.5, f: 2 };
-/* 温メニューの麺は擬似ID "S_WARM"。実在庫への充当は stockBalances が行う:
-   温用麺(助っ人打ち)から先に減らし、尽きたら細打ち麺から減らす。
-   (冷用は温に転用できるが、温用は冷に使えないため。平日は温用0でよい) */
+/* 温メニューの麺は擬似ID "S_WARM"。実在庫への充当は noodleSim が行う:
+   3日目の麺・温用麺(古い順)→細打ち麺(古い順)の順に減らす。
+   細打ち・平打ちは2日目まで冷(釜揚げ)に使い、古い順に減らす。3日目は温用に回る(2026-11-06) */
 const SOBA_RECIPE = {
   1: [["S_HOSO", "noodle"]],                                               // 三通り盛り
   2: [["S_HOSO", "noodle"], ["S_TORORO", 1], ["S_EGG", 1]],                // 山かけ(冷)
@@ -402,8 +404,109 @@ function slipConsumption(slip) {
   return c;
 }
 
-/* 在庫残の計算。daily=当日の入庫-当日の消費 / carry=全入庫-全消費
-   温注文(S_WARM)は温用麺→細打ち麺の順に充当する */
+/* ===== 麺の在庫(2026-11-06 仕様変更・同日午後に改訂) =====
+   ・麺は「打った日」ごとの塊(batch)で管理し、先入れ先出し(古い麺から使う)
+   ・細打ち麺は noodleColdDays() 日後まで冷たい蕎麦に使える(既定1=2日目まで)。平打ち麺も同じ日数まで釜揚げに使える
+   ・それを過ぎた麺は「3日目の麺(温用)」になり、noodleKeep() 日後まで温蕎麦に使える(既定2=3日目まで)。過ぎたら期限切れ
+   ・温用麺(助っ人打ち)は打った日から温専用。期限は同じ
+   ・温蕎麦は 3日目の麺・温用麺(古い順)→細打ち麺(古い順)の順に減る
+   ・入庫記録:細打ち・平打ち・温用麺はその日に打った数。マイナス(実数合わせ)は同じ品の古い麺から減らす
+     3日目の麺(S_NOKORI)の記録は、その日の朝の温専用の麺の増減(プラスは温専用になった細打ち扱い) */
+const NOODLE_FRESH = ["S_HOSO", "S_HIRA", "S_ATSU"];
+function noodleColdDays() { const n = Number(DB.noodleCold); return n >= 0 && n <= 3 ? n : 1; }
+function noodleKeep() { const c = noodleColdDays(); const n = Number(DB.noodleKeep); return n > c && n <= 5 ? n : Math.max(2, c + 1); }
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function dayDiff(a, b) { return Math.round((Date.parse(b + "T00:00:00Z") - Date.parse(a + "T00:00:00Z")) / 86400000); }
+/* 麺の日ごとの動きを古い日から順に計算する。返り値:{日付: {...}}
+   各日:hoso/hira/atsu/left(閉店時の残。hoso・hiraは冷に使える分の合計、leftは3日目の麺)
+        warm/cold/kama(温・冷・釜揚げの消費)/fromLeft/fromAtsu/fromHoso(温の充当先)/coldOld(冷のうち前日以前の麺)
+        leftStart(朝の3日目の麺)/start(朝に持ち越した麺の内訳)/end(閉店時の内訳)
+        expired(朝に期限切れで外した分)/expireTonight(今日で期限の残)/toWarmTomorrow(明日から温用に回る残) */
+function noodleSim(endDate) {
+  const ids = NOODLE_FRESH.concat(["S_NOKORI"]);
+  const inBy = {}, consBy = {};
+  let first = null;
+  for (const r of (DB.intake || [])) {
+    if (!ids.includes(r.item) || r.date > endDate) continue;
+    const m = inBy[r.date] = inBy[r.date] || {};
+    m[r.item] = (m[r.item] || 0) + r.qty;
+    if (!first || r.date < first) first = r.date;
+  }
+  for (const slip of DB.slips) {
+    if (slip.status === "void" || slip.date > endDate) continue;
+    const c = slipConsumption(slip);
+    const m = consBy[slip.date] = consBy[slip.date] || {};
+    let any = false;
+    for (const id of ["S_HOSO", "S_HIRA", "S_WARM"]) if (c[id]) { m[id] = (m[id] || 0) + c[id]; any = true; }
+    if (any && (!first || slip.date < first)) first = slip.date;
+  }
+  const out = {};
+  if (!first) first = endDate;
+  const cold = noodleColdDays(), keep = noodleKeep();
+  let bs = []; // [{kind:"S_HOSO"|"S_HIRA"|"S_ATSU", made, qty}]
+  const byOld = (x, y) => x.made === y.made ? (x.kind === "S_ATSU") - (y.kind === "S_ATSU") : (x.made < y.made ? -1 : 1);
+  /* list の古い順に need だけ取り、取れた数を返す */
+  const take = (list, need) => { let got = 0; for (const b of list.sort(byOld)) { if (need <= 0) break; if (b.qty <= 0) continue; const t = Math.min(need, b.qty); b.qty -= t; need -= t; got += t; } return got; };
+  const todayBatch = (kind, D) => { let b = bs.find(x => x.kind === kind && x.made === D); if (!b) { b = { kind, made: D, qty: 0 }; bs.push(b); } return b; };
+  const snap = () => bs.filter(b => b.qty !== 0).sort(byOld).map(b => ({ kind: b.kind, made: b.made, qty: b.qty }));
+  for (let D = first; D <= endDate; D = addDays(D, 1)) {
+    const inQ = inBy[D] || {}, cons = consBy[D] || {};
+    const age = b => dayDiff(b.made, D);
+    const warmOnly = b => b.kind === "S_ATSU" || age(b) > cold;
+    // 朝:期限切れと前夜のマイナスを外す
+    let expired = 0;
+    bs = bs.filter(b => { if (b.qty <= 0) return false; if (age(b) > keep) { expired += b.qty; return false; } return true; });
+    const start = snap();
+    // 入庫(その日に打った数。マイナスは同じ品の古い麺から減らす)
+    for (const kind of NOODLE_FRESH) {
+      const q = inQ[kind] || 0;
+      if (q > 0) todayBatch(kind, D).qty += q;
+      if (q < 0) { const got = take(bs.filter(b => b.kind === kind), -q); if (-q - got > 0) todayBatch(kind, D).qty -= (-q - got); }
+    }
+    const adj = inQ.S_NOKORI || 0;
+    if (adj > 0) bs.push({ kind: "S_HOSO", made: addDays(D, -(cold + 1)), qty: adj });
+    if (adj < 0) take(bs.filter(b => b.kind !== "S_ATSU" && warmOnly(b)), -adj);
+    const leftStart = bs.filter(b => b.kind !== "S_ATSU" && warmOnly(b)).reduce((a, b) => a + b.qty, 0);
+    // 温:まず温専用の麺(3日目の麺・温用麺)を古い順に
+    const warm = cons.S_WARM || 0;
+    let fromLeft = 0, fromAtsu = 0;
+    for (const b of bs.filter(b => warmOnly(b) && b.qty > 0).sort(byOld)) {
+      const t = Math.min(warm - fromLeft - fromAtsu, b.qty); if (t <= 0) break;
+      b.qty -= t; if (b.kind === "S_ATSU") fromAtsu += t; else fromLeft += t;
+    }
+    // 冷:細打ちを古い順に / 釜揚げ:平打ちを古い順に(足りない分は今日の麺がマイナス=在庫不足)
+    const useCold = (kind, need) => {
+      const list = bs.filter(b => b.kind === kind && !warmOnly(b));
+      const old = list.filter(b => b.made < D).reduce((a, b) => a + Math.max(0, b.qty), 0);
+      const got = take(list, need);
+      if (need - got > 0) todayBatch(kind, D).qty -= (need - got);
+      return Math.min(got, old);
+    };
+    const coldN = cons.S_HOSO || 0, kama = cons.S_HIRA || 0;
+    const coldOld = useCold("S_HOSO", coldN);
+    useCold("S_HIRA", kama);
+    // 温の残りは細打ちから(古い順)
+    const fromHoso = warm - fromLeft - fromAtsu;
+    if (fromHoso > 0) useCold("S_HOSO", fromHoso);
+    const sum = f => bs.filter(f).reduce((a, b) => a + b.qty, 0);
+    const end = snap();
+    out[D] = {
+      inQ, warm, cold: coldN, kama, fromLeft, fromAtsu, fromHoso, coldOld, leftStart, start, end, expired,
+      hoso: sum(b => b.kind === "S_HOSO" && !warmOnly(b)),
+      hira: sum(b => b.kind === "S_HIRA" && !warmOnly(b)),
+      atsu: sum(b => b.kind === "S_ATSU"),
+      left: sum(b => b.kind !== "S_ATSU" && warmOnly(b)),
+      expireTonight: sum(b => b.qty > 0 && age(b) >= keep),
+      toWarmTomorrow: sum(b => b.qty > 0 && b.kind !== "S_ATSU" && age(b) === cold),
+    };
+  }
+  return out;
+}
+
+/* 在庫残の計算。daily=当日の入庫-当日の消費 / carry=全入庫-全消費 / 麺は noodleSim */
 function stockBalances(dateStr) {
   const intake = DB.intake || [];
   const inSum = {};
@@ -425,16 +528,13 @@ function stockBalances(dateStr) {
       if (isDaily ? slip.date === dateStr : slip.date <= dateStr) consSum[id] = (consSum[id] || 0) + cons[id];
     }
   }
-  const warm = consSum["S_WARM"] || 0;
-  const fromAtsu = Math.min(warm, inSum["S_ATSU"] || 0);
-  consSum["S_ATSU"] = (consSum["S_ATSU"] || 0) + fromAtsu;
-  consSum["S_HOSO"] = (consSum["S_HOSO"] || 0) + (warm - fromAtsu);
-  delete consSum["S_WARM"];
   const bal = {};
   for (const it of SI) bal[it.id] = inSum[it.id] - (consSum[it.id] || 0);
+  const n = noodleSim(dateStr)[dateStr];
+  bal.S_HOSO = n.hoso; bal.S_HIRA = n.hira; bal.S_ATSU = n.atsu; bal.S_NOKORI = n.left;
   return bal;
 }
-/* その日1日の入庫数と使用数(温メニューの麺は温用麺→細打ちの順に充当) */
+/* その日1日の入庫数と使用数。3日目の麺の「入庫」欄は朝に温専用になった数 */
 function dayFlow(dateStr) {
   const inQ = {}, used = {};
   for (const r of (DB.intake || [])) if (r.date === dateStr) inQ[r.item] = (inQ[r.item] || 0) + r.qty;
@@ -443,12 +543,11 @@ function dayFlow(dateStr) {
     const c = slipConsumption(slip);
     for (const id in c) used[id] = (used[id] || 0) + c[id];
   }
-  const warm = used["S_WARM"] || 0;
-  const fromAtsu = Math.min(warm, inQ["S_ATSU"] || 0);
-  used["S_ATSU"] = (used["S_ATSU"] || 0) + fromAtsu;
-  used["S_HOSO"] = (used["S_HOSO"] || 0) + (warm - fromAtsu);
+  const n = noodleSim(dateStr)[dateStr];
   delete used["S_WARM"];
-  return { inQ, used };
+  used.S_HOSO = n.cold + n.fromHoso; used.S_HIRA = n.kama; used.S_ATSU = n.fromAtsu; used.S_NOKORI = n.fromLeft;
+  inQ.S_NOKORI = n.leftStart;
+  return { inQ, used, noodle: n };
 }
 function fmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(1); }
 
@@ -456,7 +555,7 @@ function fmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(1); }
 function menuRemaining(dateStr) {
   const bal = stockBalances(dateStr);
   const noodleCold = bal.S_HOSO;
-  const noodleWarm = bal.S_HOSO + bal.S_ATSU; // 温は温用+細打ちの両方を使える
+  const noodleWarm = Math.max(0, bal.S_NOKORI) + Math.max(0, bal.S_ATSU) + Math.max(0, bal.S_HOSO); // 温は3日目の麺+温用+細打ちを使える
   const res = {};
   const availOf = (id) => id === "S_WARM" ? noodleWarm : (id === "S_HOSO" ? noodleCold : bal[id]);
   for (const sb of SOBA) {
@@ -572,6 +671,8 @@ async function fetchState() {
       if (k.startsWith("prep:")) DB.prep[k.slice(5)] = Number(out.meta[k]) || 0;
       if (k.startsWith("denoms:")) { try { DB.denoms[k.slice(7)] = JSON.parse(out.meta[k]); } catch (e) {} }
       if (k === "retail_custom") { try { DB.retailCustom = JSON.parse(out.meta[k]) || []; } catch (e) {} }
+      if (k === "noodle_keep") DB.noodleKeep = Number(out.meta[k]) || 2;
+      if (k === "noodle_cold") DB.noodleCold = Number(out.meta[k]);
       if (k.startsWith("cash:")) { try { DB.cashMoves[k.slice(5)] = JSON.parse(out.meta[k]) || []; } catch (e) {} }
       if (k.startsWith("carry:")) DB.carry[k.slice(6)] = Number(out.meta[k]) || 0;
       if (k.startsWith("lock:")) { try { const v = JSON.parse(out.meta[k]); if (v) DB.locks[k.slice(5)] = v; } catch (e) {} }
@@ -1515,9 +1616,10 @@ function dailyCsvText(D, sales, cash, qr, counts, prep, counted, diff) {
   rows.push([]);
   rows.push(["在庫品目", "区分", "本日入庫", "残"]);
   const bal = stockBalances(D);
+  const fl = dayFlow(D);
   for (const it of allStockItems()) {
     const inQ = (DB.intake || []).filter(r => r.date === D && r.item === it.id).reduce((a, r) => a + r.qty, 0);
-    rows.push([it.name, it.type === "daily" ? "毎朝" : "繰越", inQ, bal[it.id]]);
+    rows.push([it.name, it.type === "daily" ? "毎朝" : (it.type === "left" ? "3日目の麺" : "繰越"), it.id === "S_NOKORI" ? fl.noodle.leftStart : inQ, bal[it.id]]);
   }
   return rows.map(r => r.map(csvCell).join(",")).join("\n");
 }
@@ -1532,25 +1634,49 @@ function confirmDlg(msg, fn) {
 }
 
 /* ---- 在庫画面 ---- */
+function md(dateStr) { return Number(dateStr.slice(5, 7)) + "/" + Number(dateStr.slice(8, 10)); }
 function renderStock() {
-  const D = today();
+  const T = today();
+  if (!view.stockDate || view.stockDate > T) view.stockDate = T;
+  const D = view.stockDate;
+  const isPast = D !== T;
   const bal = stockBalances(D);
-  const intakeToday = (DB.intake || []).filter(r => r.date === D);
 
   const flow = dayFlow(D);
-  let h = '<div class="close-sec"><h2>在庫(' + D + ')</h2>' +
+  const nd = flow.noodle;
+  let h = '<div class="close-sec"><h2>在庫を見る日・記録する日</h2><div style="padding:10px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
+    '<input type="date" id="stDate" value="' + D + '" max="' + T + '" style="padding:8px;font-size:16px;border:1px solid var(--ink);background:#fff;">' +
+    (isPast ? '<button class="btn ghost" id="stToday">今日に戻る</button>' : '<span style="color:var(--dim);font-size:13px;">今日</span>') + '</div>' +
+    (isPast ? '<div class="warn" style="margin:0 12px 10px;">' + md(D) + ' の在庫を表示中。下の「仕込み・入庫を記録」で入れた数は ' + md(D) + ' の分として記録されます' +
+      (isLocked(D) ? '(この日は締め確定済みのため記録できません)' : '(麺を直すと、翌日以降の麺の残も自動で計算し直します)') + '</div>' : '') +
+    '</div>';
+  h += '<div class="close-sec"><h2>在庫(' + D + ')</h2>' +
     '<div class="kv" style="font-size:12px;color:var(--dim);padding-top:6px;padding-bottom:6px;"><span>品目</span>' +
-    '<span style="display:flex;gap:0;"><span style="width:58px;text-align:right;">本日入庫</span><span style="width:58px;text-align:right;">本日使用</span><span style="width:84px;text-align:right;">残</span></span></div>';
+    '<span style="display:flex;gap:0;"><span style="width:58px;text-align:right;">' + (isPast ? "入庫" : "本日入庫") + '</span><span style="width:58px;text-align:right;">' + (isPast ? "使用" : "本日使用") + '</span><span style="width:84px;text-align:right;">' + (isPast ? "閉店時の残" : "残") + '</span></span></div>';
   for (const it of allStockItems().filter(i => !i.retired)) {
     const b = bal[it.id];
     const inq = flow.inQ[it.id] || 0, used = flow.used[it.id] || 0;
     const warn = b <= 0 ? "color:var(--shu);" : "";
     h += '<div class="kv"><span>' + esc(it.name) +
-      ' <span style="color:var(--dim);font-size:11px;display:block;">' + (it.type === "daily" ? "毎朝仕込み" : "繰越") + "</span></span>" +
+      ' <span style="color:var(--dim);font-size:11px;display:block;">' + (it.type === "daily" ? (it.id === "S_HOSO" ? "冷用・前日までの分も含む" : it.id === "S_HIRA" ? "釜揚げ用・前日までの分も含む" : it.id === "S_ATSU" ? "温専用・前日までの分も含む" : "毎朝仕込み") : (it.type === "left" ? "冷の期限を過ぎた麺・温蕎麦用" : "繰越")) + "</span></span>" +
       '<span style="display:flex;align-items:baseline;">' +
       '<span class="num" style="width:58px;text-align:right;color:var(--dim);">' + (inq ? "+" + fmtQty(inq) : "−") + "</span>" +
       '<span class="num" style="width:58px;text-align:right;color:var(--dim);">' + (used ? fmtQty(used) : "−") + "</span>" +
       '<b class="num" style="width:84px;text-align:right;font-size:18px;' + warn + '">' + fmtQty(b) + '<span style="font-size:12px;font-weight:400;"> ' + it.unit + "</span></b></span></div>";
+  }
+  /* 麺の内訳(打った日ごと) */
+  {
+    const nm = { S_HOSO: "細打ち", S_HIRA: "平打ち", S_ATSU: "温用" };
+    const cold = noodleColdDays();
+    const fmtB = list => list.filter(b => b.qty > 0).map(b => md(b.made) + "打ち" + nm[b.kind] + " " + fmtQty(b.qty) +
+      (b.kind !== "S_ATSU" && dayDiff(b.made, D) > cold ? "(温用)" : "")).join(" / ") || "なし";
+    h += '<div class="kv" style="font-size:13px;"><span style="color:var(--dim);">朝に持ち越した麺: ' + fmtB(nd.start) +
+      (nd.expired > 0 ? '<br>期限切れで外した分: ' + fmtQty(nd.expired) + '玉' : '') +
+      '<br>' + (isPast ? '閉店時' : '今') + 'の麺: ' + fmtB(nd.end) +
+      '<br>冷 ' + fmtQty(nd.cold) + '玉のうち前日以前の麺 ' + fmtQty(nd.coldOld) + '<br>温 ' + fmtQty(nd.warm) + '玉の出どころ: 3日目の麺 ' + fmtQty(nd.fromLeft) + '・温用麺 ' + fmtQty(nd.fromAtsu) + '・細打ち ' + fmtQty(nd.fromHoso) +
+      (nd.toWarmTomorrow > 0 ? '<br>明日から温用に回る麺: ' + fmtQty(nd.toWarmTomorrow) + '玉' : '') +
+      (nd.expireTonight > 0 ? '<br><span style="color:var(--shu);">今日が期限の麺: あと ' + fmtQty(nd.expireTonight) + '玉</span>' : '') +
+      '</span><b></b></div>';
   }
   h += '</div>';
 
@@ -1573,7 +1699,7 @@ function renderStock() {
   h += '<div class="kv"><span style="color:var(--dim);font-size:12px;">材料は品目間で共有のため、各行は「その品だけ出した場合」の上限です</span><b></b></div>';
   h += "</div>";
 
-  h += '<div class="close-sec"><h2>仕込み・入庫を記録</h2><div style="padding:10px 12px;">' +
+  h += '<div class="close-sec"><h2>仕込み・入庫を記録' + (isPast ? '(' + md(D) + ' の分)' : '') + '</h2><div style="padding:10px 12px;">' +
     '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
     '<select id="inItem" style="flex:2;min-width:160px;padding:10px;font-size:16px;border:1px solid var(--ink);background:#fff;">';
   for (const it of allStockItems().filter(i => !i.retired)) h += '<option value="' + it.id + '">' + esc(it.name) + "(" + it.unit + ")</option>";
@@ -1583,7 +1709,16 @@ function renderStock() {
     '<div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:14px;">' +
     '<label><input type="radio" name="inMode" value="add" checked> 入庫(数を足す)</label>' +
     '<label><input type="radio" name="inMode" value="set"> 実数に合わせる(数えた数を入れる)</label></div>' +
-    '<p style="color:var(--dim);font-size:12px;margin-top:8px;">入れすぎた時は下の記録の「取消」、または「実数に合わせる」で実際に数えた数を入れると、差を自動で直します。毎朝仕込みの品は当日限り(翌日に持ち越しません)。繰越の品は残がそのまま明日に続きます。温かい蕎麦は温用麺から先に減り、尽きると細打ち麺から減ります(平日は温用麺0のままでOK)。</p>' +
+    '<p style="color:var(--dim);font-size:12px;margin-top:8px;">入れすぎた時は下の記録の「取消」、または「実数に合わせる」で実際に数えた数を入れると、差を自動で直します。過去の日の分は、一番上で日付を選んでから記録します(' + (isPast ? "その日の閉店時の残に合わせます" : "締め確定済みの日は不可") + ')。<br>' +
+    '<b>麺</b>:打った日ごとに管理し、古い麺から先に使います(先入れ先出し)。細打ち麺は ' + ["当日", "2日目", "3日目", "4日目"][noodleColdDays()] + 'まで冷たい蕎麦に、平打ち麺は同じく釜揚げに使い、それを過ぎると「3日目の麺(温用)」になります。温かい蕎麦は 3日目の麺・温用麺(古い順)→細打ち麺(古い順)の順に減ります。打った数はその日の日付で記録してください。数えて直す時は品を選んで「実数に合わせる」(細打ち・平打ちは冷に使える分の合計)。<br>' +
+    '温つゆ・ご飯は当日限り。繰越の品は残がそのまま明日に続きます。</p>' +
+    '<div style="display:flex;gap:8px;align-items:center;margin-top:6px;font-size:14px;flex-wrap:wrap;">冷に使うのは ' +
+    '<select id="nCold" style="padding:6px;font-size:15px;border:1px solid var(--ink);background:#fff;">' +
+    [0, 1, 2].map(n => '<option value="' + n + '"' + (noodleColdDays() === n ? " selected" : "") + '>' + ["当日だけ", "2日目まで", "3日目まで"][n] + "</option>").join("") +
+    '</select> 温に回して ' +
+    '<select id="nKeep" style="padding:6px;font-size:15px;border:1px solid var(--ink);background:#fff;">' +
+    [1, 2, 3, 4].filter(n => n > noodleColdDays()).map(n => '<option value="' + n + '"' + (noodleKeep() === n ? " selected" : "") + '>' + (n + 1) + "日目まで</option>").join("") +
+    '</select>(全端末共通)</div>' +
     "</div></div>";
 
   /* 物販の品目管理 */
@@ -1617,37 +1752,62 @@ function renderStock() {
   }
   h += "</div>";
 
-  const since = (() => { const d = new Date(); d.setDate(d.getDate() - 6); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); })();
-  const recent = (DB.intake || []).filter(r => r.date >= since).sort((a, b) => b.ts - a.ts);
-  h += '<div class="close-sec"><h2>入庫の記録(直近7日・取消できます)</h2>';
+  const since = addDays(T, -13);
+  const recentTs = Date.now() - 7 * 86400000;
+  const recent = (DB.intake || []).filter(r => r.date >= since || r.ts >= recentTs || r.date === D)
+    .sort((a, b) => a.date === b.date ? b.ts - a.ts : (a.date < b.date ? 1 : -1));
+  h += '<div class="close-sec"><h2>入庫の記録(直近2週間・締め確定日以外は取消できます)</h2>';
   if (!recent.length) h += '<div class="kv"><span style="color:var(--dim)">まだありません</span><b></b></div>';
   for (const r of recent) {
     const it = stockById(r.item);
-    const daily = it && it.type === "daily";
-    h += '<div class="kv"><span>' + esc(it ? it.name : r.item) + ' <span style="color:var(--dim);font-size:12px;">' + (r.date === D ? "" : r.date.slice(5) + " ") + r.time + (r.note ? "・" + esc(r.note) : "") + "</span></span>" +
+    const late = r.recDate && r.recDate !== r.date ? "・" + md(r.recDate) + "に記録" : "";
+    h += '<div class="kv"><span>' + esc(it ? it.name : r.item) + ' <span style="color:var(--dim);font-size:12px;">' + (r.date === T ? "" : md(r.date) + "分 ") + r.time + late + (r.note ? "・" + esc(r.note) : "") + "</span></span>" +
       '<span><b class="num">' + (r.qty >= 0 ? "+" : "−") + fmtQty(Math.abs(r.qty)) + "</b>　" +
-      ((daily && r.date !== D) ? '<span style="color:var(--dim);font-size:12px;">当日限り</span>' :
+      (isLocked(r.date) ? '<span style="color:var(--dim);font-size:12px;">締め確定済み</span>' :
         '<button data-rmintake="' + r.ts + '" style="color:var(--shu);border:1px solid var(--rule);padding:2px 8px;font-size:12px;">取消</button>') + "</span></div>";
   }
   h += "</div>";
 
   main.innerHTML = h;
+  document.getElementById("stDate").onchange = (e) => { view.stockDate = e.target.value || today(); render(); };
+  const stT = document.getElementById("stToday");
+  if (stT) stT.onclick = () => { view.stockDate = today(); render(); };
+  document.getElementById("nCold").onchange = (e) => {
+    DB.noodleCold = Number(e.target.value);
+    queueOp("/meta", { k: "noodle_cold", v: String(DB.noodleCold) });
+    if (Number(DB.noodleKeep) <= DB.noodleCold) { DB.noodleKeep = DB.noodleCold + 1; queueOp("/meta", { k: "noodle_keep", v: String(DB.noodleKeep) }); }
+    save(); render();
+  };
+  document.getElementById("nKeep").onchange = (e) => {
+    DB.noodleKeep = Number(e.target.value) || 2;
+    save(); queueOp("/meta", { k: "noodle_keep", v: String(DB.noodleKeep) }); render();
+  };
   document.getElementById("btnIntake").onclick = () => {
-    if (isLocked(today())) { lockedAlert(today()); return; }
+    if (isLocked(D)) { lockedAlert(D); return; }
     const item = document.getElementById("inItem").value;
     const raw = parseFloat(document.getElementById("inQty").value);
     const mode = (main.querySelector('input[name="inMode"]:checked') || {}).value || "add";
     if (isNaN(raw) || raw < 0 || (mode === "add" && raw === 0)) return;
     let q = raw, note = "";
     if (mode === "set") {
-      const cur = stockBalances(today())[item] || 0;
+      const cur = stockBalances(D)[item] || 0;
       q = raw - cur;
       if (q === 0) { alert("すでに" + raw + "になっています"); return; }
       note = "実数合わせ";
     }
     if (!DB.intake) DB.intake = [];
-    const rec = { ts: Date.now(), date: today(), time: nowTime(), item, qty: q };
+    const rec = { ts: Date.now(), date: D, time: nowTime(), item, qty: q };
+    if (D !== today()) rec.recDate = today(); // 後から過去の日付で記録した印
     if (note) rec.note = note;
+    if (D !== today()) {
+      const it = stockById(item);
+      confirmDlg(md(D) + " の分として「" + (it ? it.name : item) + " " + (q >= 0 ? "+" : "−") + fmtQty(Math.abs(q)) + "」を記録しますか?", () => {
+        if (!DB.intake) DB.intake = [];
+        DB.intake.push(rec);
+        save(); queueOp("/intake", { rec }); render();
+      });
+      return;
+    }
     DB.intake.push(rec);
     save(); queueOp("/intake", { rec }); render();
   };
@@ -1695,10 +1855,24 @@ function renderStock() {
     r.retired = !r.retired;
     save(); queueOp("/meta", { k: "retail_custom", v: JSON.stringify(DB.retailCustom) }); render();
   });
-  main.querySelectorAll("[data-rmintake]").forEach(el => el.onclick = () => confirmDlg("この入庫の記録を取り消しますか?", () => {
-    DB.intake = DB.intake.filter(r => String(r.ts) !== el.dataset.rmintake);
-    save(); queueOp("/intake/delete", { ts: el.dataset.rmintake }); render();
-  }));
+  main.querySelectorAll("[data-rmintake]").forEach(el => {
+    const r = (DB.intake || []).find(x => String(x.ts) === el.dataset.rmintake);
+    if (!r) return;
+    const it = stockById(r.item);
+    const T2 = today();
+    let msg = (r.date === T2 ? "" : md(r.date) + " の分の ") + "「" + (it ? it.name : r.item) + " " + (r.qty >= 0 ? "+" : "−") + fmtQty(Math.abs(r.qty)) + "」の記録を取り消しますか?";
+    if (r.date !== T2) {
+      if (NOODLE_FRESH.includes(r.item) || r.item === "S_NOKORI") msg += "\n麺の記録なので、翌日以降の麺の残も計算し直されます(今日の麺の数が変わることがあります)。";
+      else if (it && it.type === "daily") msg += "\n毎朝仕込みの品なので、今日の在庫は変わりません(" + md(r.date) + " の記録だけ直ります)。";
+    }
+    el.onclick = () => {
+      if (isLocked(r.date)) { lockedAlert(r.date); return; }
+      confirmDlg(msg, () => {
+        DB.intake = DB.intake.filter(x => String(x.ts) !== el.dataset.rmintake);
+        save(); queueOp("/intake/delete", { ts: el.dataset.rmintake }); render();
+      });
+    };
+  });
 }
 
 /* ---- 読み取り結果の取り込み ---- */
@@ -1893,7 +2067,7 @@ function shrinkToBase64(file, maxSide, quality) {
 
 /* ---- タブ ---- */
 document.getElementById("tabSlips").onclick = () => { view.tab = "slips"; view.mode = "list"; render(); refreshSoon(); };
-document.getElementById("tabStock").onclick = () => { view.tab = "stock"; render(); refreshSoon(); };
+document.getElementById("tabStock").onclick = () => { view.tab = "stock"; view.stockDate = today(); render(); refreshSoon(); };
 document.getElementById("tabClose").onclick = () => { view.tab = "close"; render(); refreshSoon(); };
 
 /* ---- パスコードロック ---- */
