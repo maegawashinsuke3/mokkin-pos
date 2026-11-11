@@ -202,6 +202,35 @@
   .datepick { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
   .datepick select { padding: 8px; font-size: 16px; border: 1px solid var(--ink); background: #fff; }
 
+  /* ===== attendance ===== */
+  .attclock { font-size: 34px; font-weight: 700; text-align: center; padding: 10px 0 2px; }
+  .attclock small { display: block; font-size: 12px; font-weight: 400; color: var(--dim); }
+  .attstaff { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; padding: 10px 12px 12px; }
+  .attstaff button { border: 1px solid var(--ink); background: #fff; padding: 12px 8px; text-align: center; }
+  .attstaff button b { display: block; font-size: 18px; }
+  .attstaff button span { font-size: 12px; color: var(--dim); }
+  .attstaff button.work { border-color: var(--ok); }
+  .attstaff button.work span { color: var(--ok); font-weight: 700; }
+  .attstaff button.brk span { color: var(--shu); font-weight: 700; }
+  .punchbtns { display: flex; flex-direction: column; gap: 10px; margin: 14px 0; }
+  .punchbtns .btn { padding: 16px; font-size: 19px; }
+  .atttbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .atttbl th, .atttbl td { border-top: 1px solid var(--rule); padding: 6px 4px; text-align: right; white-space: nowrap; }
+  .atttbl th { font-weight: 700; background: var(--shade); }
+  .atttbl td.l, .atttbl th.l { text-align: left; }
+  .atttbl tr.tap { cursor: pointer; }
+  .atttbl tr.tap:active { background: var(--shade); }
+  .atttbl .w { color: var(--shu); }
+  .attnote { font-size: 12px; color: var(--dim); padding: 6px 12px 10px; }
+  .attwarn { color: var(--shu); font-size: 13px; padding: 2px 12px; }
+  .attform label { display: block; font-size: 13px; color: var(--dim); margin: 10px 0 4px; }
+  .attform input, .attform select, .attform textarea { width: 100%; padding: 8px; font-size: 16px; border: 1px solid var(--ink); background: #fff; border-radius: 0; }
+  .attform textarea { height: 70px; font-size: 15px; }
+  .fixcard { border-top: 1px solid var(--rule); padding: 8px 12px; font-size: 14px; }
+  .fixcard .r { color: var(--dim); font-size: 13px; }
+  .fixcard .b { display: flex; gap: 8px; margin-top: 6px; }
+  .fixcard .b .btn { padding: 8px 14px; font-size: 14px; }
+
   dialog { border: 1px solid var(--ink); background: var(--paper); padding: 20px; max-width: 90vw; }
   dialog::backdrop { background: rgba(29,27,24,.45); }
   dialog p { margin-bottom: 16px; }
@@ -221,6 +250,7 @@
     <button id="tabSlips" class="on">伝票</button>
     <button id="tabStock">在庫</button>
     <button id="tabClose">締め</button>
+    <button id="tabAtt">勤怠</button>
   </nav>
   <main id="main"></main>
 </div>
@@ -242,6 +272,24 @@
     <button class="btn ghost" id="dnNo">やめる</button>
     <button class="btn primary" id="dnYes">決定</button>
   </div>
+</dialog>
+
+<!-- 勤怠:暗証番号の入力 -->
+<dialog id="dlgPin" style="width:min(380px,92vw);">
+  <div id="pinTitle" style="font-size:17px;font-weight:700;"></div>
+  <div id="pinSub" style="font-size:13px;color:var(--dim);margin-top:4px;white-space:pre-line;"></div>
+  <select id="pinWho" style="width:100%;margin-top:10px;padding:8px;font-size:16px;border:1px solid var(--ink);background:#fff;"></select>
+  <input id="pinVal" type="password" inputmode="numeric" autocomplete="off" enterkeyhint="done" placeholder="暗証番号"
+    style="width:100%;font-size:26px;letter-spacing:6px;text-align:center;padding:8px;border:1px solid var(--ink);background:#fff;margin:10px 0 4px;border-radius:0;">
+  <div id="pinErr" style="color:var(--shu);font-size:13px;min-height:1.2em;margin-bottom:8px;"></div>
+  <div class="dlgbtns">
+    <button class="btn ghost" id="pinNo">やめる</button>
+    <button class="btn primary" id="pinYes">決定</button>
+  </div>
+</dialog>
+<!-- 勤怠:打刻・修正・報告・スタッフ登録の小窓(中身は描画時に入れる) -->
+<dialog id="dlgAtt" style="width:min(520px,94vw);">
+  <div id="attBox"></div>
 </dialog>
 
 <input type="file" id="camInput" accept="image/*" capture="environment" style="display:none">
@@ -822,6 +870,8 @@ function render() {
   document.getElementById("tabSlips").className = view.tab === "slips" ? "on" : "";
   document.getElementById("tabStock").className = view.tab === "stock" ? "on" : "";
   document.getElementById("tabClose").className = view.tab === "close" ? "on" : "";
+  document.getElementById("tabAtt").className = view.tab === "att" ? "on" : "";
+  if (view.tab === "att") { renderAttend(); return; }
   if (view.tab === "close") { renderClose(); return; }
   if (view.tab === "stock") { renderStock(); return; }
   if (view.mode === "edit") { renderEditor(); return; }
@@ -2192,10 +2242,673 @@ function shrinkToBase64(file, maxSide, quality) {
   });
 }
 
+/* ================= 勤怠(2026-11-11) =================
+   打刻の時刻はWorkerが決める(端末の時計は使わない)。打刻は消さず、直しは「修正の申請→承認」で重ねる。
+   計算はすべて日本時間。労働時間=出勤〜退勤−休憩。休憩が有給の設定なら、賃金の対象時間=労働時間+休憩。
+   時間外=1日8時間超+週の上限(既定44時間・特例措置対象事業場)超。法定休日(既定 火曜)の労働は休日労働として別に数える。 */
+const ATT_KEY = "kikkin_att_v1";
+let ATT = (() => { try { return JSON.parse(localStorage.getItem(ATT_KEY)) || null; } catch (e) { return null; } })()
+  || { staff: [], punches: [], fixes: [], meta: {}, offset: 0, loaded: false };
+let attErr = "";
+function saveAtt() { try { localStorage.setItem(ATT_KEY, JSON.stringify(ATT)); } catch (e) {} }
+async function fetchAtt() {
+  if (!remoteOn()) { attErr = "この端末は共有台帳につながっていません(右上の「設定」でサーバーURLと合言葉を入れてください)"; return; }
+  try {
+    const out = await api("/att/state", "GET");
+    ATT = { staff: out.staff || [], punches: out.punches || [], fixes: out.fixes || [], meta: out.meta || {},
+      offset: (out.now || Date.now()) - Date.now(), loaded: true };
+    attErr = "";
+    saveAtt();
+  } catch (e) { attErr = "勤怠の記録を読み込めません: " + e.message; }
+}
+const ATT_DEF = { weekLimit: 44, weekStart: 0, legalHoliday: 2, breakPaid: true, weekTarget: 40 }; // weekTarget=店の目安(警告だけ。割増の計算には使わない。0=なし)
+function attCfg() { try { return { ...ATT_DEF, ...(JSON.parse(ATT.meta.att_cfg || "null") || {}) }; } catch (e) { return { ...ATT_DEF }; } }
+function attNow() { return Date.now() + (ATT.offset || 0); }
+const JST = 9 * 3600000;
+function jstDate(ts) { return new Date(ts + JST).toISOString().slice(0, 10); }
+function jstHM(ts, sec) { const s = new Date(ts + JST).toISOString(); return sec ? s.slice(11, 19) : s.slice(11, 16); }
+function jstTs(date, hm) { return Date.parse(date + "T" + hm + ":00+09:00"); }
+function jstDow(date) { return new Date(date + "T00:00:00Z").getUTCDay(); }
+function hmm(min) { min = Math.round(min || 0); const neg = min < 0; min = Math.abs(min); return (neg ? "−" : "") + Math.floor(min / 60) + ":" + String(min % 60).padStart(2, "0"); }
+function staffName(id) { const s = ATT.staff.find(x => x.id === id); return s ? s.name : "(不明)"; }
+function activeStaff() { return ATT.staff.filter(s => s.active !== false); }
+function owners() { return activeStaff().filter(s => s.role === "owner"); }
+function attLocked(month) { return !!ATT.meta["attlock:" + month]; }
+const PUNCH_NAME = { in: "出勤", bs: "休憩に入る", be: "休憩から戻る", out: "退勤", report: "仕入れの報告" };
+const DOWJ = "日月火水木金土";
+
+/* 承認済みの修正を重ねた「有効な打刻」 */
+function attEffective(staffId) {
+  let list = ATT.punches.filter(p => p.type !== "report" && (!staffId || p.staff === staffId)).map(p => ({ ...p }));
+  const ap = ATT.fixes.filter(f => f.status === "approved" && (!staffId || f.staff === staffId)).sort((a, b) => a.decidedAt - b.decidedAt);
+  for (const f of ap) {
+    if (f.action === "add") list.push({ id: "fix-" + f.id, staff: f.staff, type: f.type, kind: f.kind, ts: f.ts, fixed: f.id });
+    else if (f.action === "change") { const p = list.find(x => x.id === f.punchId); if (p) { p.ts = f.ts; p.fixed = f.id; } }
+    else if (f.action === "delete") list = list.filter(x => x.id !== f.punchId);
+  }
+  return list.sort((a, b) => a.ts - b.ts);
+}
+/* 打刻を勤務(出勤〜退勤)のまとまりにする */
+function attShifts(staffId) {
+  const shifts = []; let cur = null;
+  const odd = (ts, msg) => shifts.push({ odd: true, ts, date: jstDate(ts), msg });
+  for (const p of attEffective(staffId)) {
+    if (p.type === "in") {
+      if (cur) { cur.noOut = true; shifts.push(cur); }
+      cur = { in: p.ts, date: jstDate(p.ts), kind: p.kind, breaks: [], bs: null, punches: [p] };
+    } else if (!cur) { odd(p.ts, PUNCH_NAME[p.type] + "(" + jstHM(p.ts) + ")の前に出勤の打刻がありません"); }
+    else if (p.type === "bs") { cur.punches.push(p); if (cur.bs == null) cur.bs = p.ts; }
+    else if (p.type === "be") { cur.punches.push(p); if (cur.bs != null) { cur.breaks.push([cur.bs, p.ts]); cur.bs = null; } else cur.oddMsg = "休憩に入る打刻がないまま「休憩から戻る」があります"; }
+    else if (p.type === "out") {
+      cur.punches.push(p);
+      if (cur.bs != null) { cur.breaks.push([cur.bs, p.ts]); cur.bs = null; cur.oddMsg = "休憩から戻らないまま退勤しています(退勤までを休憩として計算)"; }
+      cur.out = p.ts; shifts.push(cur); cur = null;
+    }
+  }
+  if (cur) { if (cur.date === jstDate(attNow())) cur.ongoing = true; else cur.noOut = true; shifts.push(cur); }
+  return shifts;
+}
+function attState(staffId) {
+  const sh = attShifts(staffId).filter(s => !s.odd);
+  const last = sh[sh.length - 1];
+  if (last && last.ongoing) return last.bs != null ? { st: "brk", shift: last } : { st: "work", shift: last };
+  return { st: "off", shift: null };
+}
+/* 区間 [a,b] から休憩を引いた労働区間 */
+function laborIntervals(s, end) {
+  const out = []; let t = s.in;
+  const brs = s.breaks.slice(); if (s.bs != null) brs.push([s.bs, end]);
+  brs.sort((x, y) => x[0] - y[0]);
+  for (const [a, b] of brs) { if (a > t) out.push([t, Math.min(a, end)]); t = Math.max(t, b); }
+  if (end > t) out.push([t, end]);
+  return out;
+}
+function nightMin(ivs) { // 22:00〜翌5:00(日本時間)
+  let m = 0;
+  for (const [a, b] of ivs) {
+    let d = jstDate(a - 86400000);
+    while (d <= jstDate(b)) {
+      const ns = jstTs(d, "22:00"), ne = ns + 7 * 3600000;
+      m += Math.max(0, Math.min(b, ne) - Math.max(a, ns)) / 60000;
+      d = addDays(d, 1);
+    }
+  }
+  return m;
+}
+/* スタッフ1人の日ごとの集計(全期間)。週の上限・法定休日の判定のため、月をまたいで頭から計算する */
+function attDaily(staffId) {
+  const cfg = attCfg();
+  const days = {};
+  const get = d => days[d] || (days[d] = { date: d, shifts: [], labor: 0, brk: 0, gap: 0, night: 0, notes: [], trip: false, fixed: false, ongoing: false });
+  const now = attNow();
+  for (const s of attShifts(staffId)) {
+    const day = get(s.date);
+    if (s.odd) { day.notes.push(s.msg); continue; }
+    day.shifts.push(s);
+    if (s.kind === "trip") day.trip = true;
+    if (s.punches.some(p => p.fixed)) day.fixed = true;
+    if (s.oddMsg) day.notes.push(s.oddMsg);
+    if (s.noOut) { day.notes.push("退勤の打刻がありません(" + jstHM(s.in) + " 出勤)。修正の申請をしてください"); continue; }
+    const end = s.ongoing ? now : s.out;
+    if (s.ongoing) day.ongoing = true;
+    const ivs = laborIntervals(s, end);
+    day.labor += ivs.reduce((a, [x, y]) => a + (y - x) / 60000, 0);
+    day.brk += s.breaks.reduce((a, [x, y]) => a + (y - x) / 60000, 0) + (s.bs != null ? (end - s.bs) / 60000 : 0);
+    day.night += nightMin(ivs);
+  }
+  const weekAcc = {}, weekAll = {};
+  for (const d of Object.keys(days).sort()) {
+    const day = days[d];
+    day.labor = Math.round(day.labor); day.brk = Math.round(day.brk); day.night = Math.round(day.night);
+    const done = day.shifts.filter(s => s.out || s.ongoing);
+    for (let i = 1; i < done.length; i++) if (done[i - 1].out) day.gap += Math.max(0, Math.round((done[i].in - done[i - 1].out) / 60000));
+    const dow = jstDow(d);
+    const wk = addDays(d, -((dow - cfg.weekStart + 7) % 7));
+    day.week = wk;
+    day.holiday = cfg.legalHoliday >= 0 && dow === cfg.legalHoliday && day.labor > 0;
+    if (day.holiday) { day.within = 0; day.ot = 0; day.hol = day.labor; }
+    else {
+      const dot = Math.max(0, day.labor - 480);
+      let within = day.labor - dot;
+      weekAcc[wk] = (weekAcc[wk] || 0) + within;
+      const wot = Math.min(within, Math.max(0, weekAcc[wk] - cfg.weekLimit * 60));
+      within -= wot;
+      day.within = within; day.ot = dot + wot; day.hol = 0; day.weekOt = wot; day.dayOt = dot;
+    }
+    day.weekSoFar = weekAcc[wk] || 0;
+    /* 店の目安(既定 週40時間):休日労働・時間外も含めた、その週に実際に働いた時間の合計で見る */
+    const prevAll = weekAll[wk] || 0;
+    weekAll[wk] = prevAll + day.labor;
+    day.weekAll = weekAll[wk];
+    if (cfg.weekTarget > 0 && day.weekAll > cfg.weekTarget * 60 && !(day.weekOt > 0)) {
+      day.overTarget = true;
+      day.notes.push(prevAll > cfg.weekTarget * 60 ? "今週は目安の週" + cfg.weekTarget + "時間をすでに超えています(今週 " + hmm(day.weekAll) + ")"
+        : "この日で目安の週" + cfg.weekTarget + "時間を超えました(今週 " + hmm(day.weekAll) + "・" + hmm(day.weekAll - cfg.weekTarget * 60) + " 超過)");
+    }
+    day.paidBrk = cfg.breakPaid ? day.brk : 0;
+    day.payMin = day.labor + day.paidBrk;
+    const rest = day.brk + day.gap;
+    if (day.labor > 480 && rest < 60) day.notes.push("8時間を超えて働いたのに、休憩が1時間未満です(休憩 " + rest + "分)");
+    else if (day.labor > 360 && rest < 45) day.notes.push("6時間を超えて働いたのに、休憩が45分未満です(休憩 " + rest + "分)");
+    if (day.dayOt > 0) day.notes.push("1日8時間を超えています(時間外 " + hmm(day.dayOt) + ")");
+    if (day.weekOt > 0) day.notes.push("週" + cfg.weekLimit + "時間を超えた分があります(時間外 " + hmm(day.weekOt) + ")");
+    if (day.holiday) day.notes.push("法定休日(" + DOWJ[cfg.legalHoliday] + "曜)の労働です(休日労働 " + hmm(day.hol) + "・35%増し)");
+  }
+  return days;
+}
+function attMonthDays(staffId, ym) { const all = attDaily(staffId); return Object.keys(all).filter(d => d.startsWith(ym)).sort().map(d => all[d]); }
+function attMonthSum(days) {
+  const t = { days: 0, labor: 0, within: 0, ot: 0, hol: 0, night: 0, paidBrk: 0, payMin: 0, trip: 0, notes: 0 };
+  for (const d of days) {
+    if (d.labor > 0) t.days++;
+    for (const k of ["labor", "within", "ot", "hol", "night", "paidBrk", "payMin"]) t[k] += d[k] || 0;
+    if (d.trip) t.trip++;
+    t.notes += d.notes.length;
+  }
+  return t;
+}
+function attMonths() {
+  const s = new Set([jstDate(attNow()).slice(0, 7)]);
+  for (const p of ATT.punches) s.add(jstDate(p.ts).slice(0, 7));
+  return [...s].sort().reverse();
+}
+function attReports(ym) {
+  return ATT.punches.filter(p => p.type === "report" && p.report && (!ym || (p.report.day || "").startsWith(ym))).sort((a, b) => a.ts - b.ts);
+}
+function fixLabel(f) {
+  const t = PUNCH_NAME[f.type] || "";
+  const w = ts => md(jstDate(ts)) + " " + jstHM(ts);
+  if (f.action === "add") return "追加:" + t + (f.kind === "trip" ? "(外出・仕入れ)" : "") + " " + w(f.ts);
+  if (f.action === "change") return "変更:" + t + " " + w(f.oldTs) + " → " + (jstDate(f.oldTs) === jstDate(f.ts) ? jstHM(f.ts) : w(f.ts));
+  return "取消:" + t + " " + w(f.oldTs);
+}
+
+/* ---- 暗証番号の入力(Promiseで {id, pin} を返す。やめたら null) ----
+   who: スタッフID(本人) / "owner"(承認する人) / null(名前を選ぶ) */
+const dlgPin = document.getElementById("dlgPin");
+const dlgAtt = document.getElementById("dlgAtt");
+function askPin(title, who, sub) {
+  const list = who === "owner" ? owners() : who ? ATT.staff.filter(s => s.id === who) : activeStaff();
+  return askPinList(title, list, sub);
+}
+function askPinFrom(title, ids, sub) { return askPinList(title, ids.map(id => ATT.staff.find(s => s.id === id)).filter(Boolean), sub); }
+function askPinList(title, list, sub) {
+  return new Promise(resolve => {
+    const sel = document.getElementById("pinWho");
+    sel.innerHTML = list.map(s => '<option value="' + esc(s.id) + '">' + esc(s.name) + (s.role === "owner" ? "(承認する人)" : "") + "</option>").join("");
+    sel.style.display = list.length > 1 ? "" : "none";
+    document.getElementById("pinTitle").textContent = title;
+    document.getElementById("pinSub").textContent = sub || (list.length === 1 ? list[0].name + " さんの暗証番号" : "");
+    const inp = document.getElementById("pinVal");
+    inp.value = ""; document.getElementById("pinErr").textContent = "";
+    const done = v => { dlgPin.close(); resolve(v); };
+    document.getElementById("pinNo").onclick = () => done(null);
+    const go = () => {
+      const pin = inp.value.trim();
+      if (!/^\d{4,8}$/.test(pin)) { document.getElementById("pinErr").textContent = "数字4〜8桁で入れてください"; return; }
+      done({ id: sel.value || (list[0] && list[0].id), pin });
+    };
+    document.getElementById("pinYes").onclick = go;
+    inp.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); go(); } };
+    dlgPin.oncancel = e => { e.preventDefault(); done(null); };
+    dlgPin.showModal();
+    setTimeout(() => inp.focus(), 50);
+  });
+}
+async function attPost(path, body) {
+  if (!remoteOn()) throw new Error("この端末は共有台帳につながっていません。右上の「設定」でサーバーURLと合言葉を入れてください");
+  return api(path, "POST", body);
+}
+
+/* ---- 打刻の小窓 ---- */
+let attSess = null; // {id, pin, until} 暗証番号を入れてから2分間だけ、続けて操作できる
+function sessFor(id) { return attSess && attSess.id === id && attSess.until > Date.now() ? attSess : null; }
+async function openPunch(staffId) {
+  let s = sessFor(staffId);
+  if (!s) {
+    const r = await askPin("打刻", staffId);
+    if (!r) return;
+    s = attSess = { id: staffId, pin: r.pin, until: Date.now() + 120000 };
+  }
+  renderPunchBox(staffId);
+}
+function renderPunchBox(staffId, msg) {
+  const st = attState(staffId);
+  const today0 = jstDate(attNow());
+  const box = document.getElementById("attBox");
+  const nm = staffName(staffId);
+  const sh = st.shift;
+  const tripToday = attShifts(staffId).some(x => !x.odd && x.date === today0 && x.kind === "trip");
+  const reported = attReports().some(p => p.staff === staffId && p.report.day === today0);
+  let h = '<div style="font-size:19px;font-weight:700;">' + esc(nm) + ' さん</div>' +
+    '<div style="font-size:14px;color:var(--dim);margin-top:2px;">' +
+    (st.st === "work" ? "勤務中(" + jstHM(sh.in) + " 出勤" + (sh.kind === "trip" ? "・外出・仕入れ" : "") + ")" :
+      st.st === "brk" ? "休憩中(" + jstHM(sh.bs) + " から)" : "出勤していません") + "</div>";
+  {
+    const cfg = attCfg(), dd = attDaily(staffId);
+    const wk = addDays(today0, -((jstDow(today0) - cfg.weekStart + 7) % 7));
+    const wsum = Object.values(dd).filter(d => d.date >= wk && d.date <= today0).reduce((a, d) => a + d.labor, 0);
+    if (cfg.weekTarget > 0) {
+      const over = wsum > cfg.weekTarget * 60;
+      h += '<div style="font-size:14px;margin-top:4px;' + (over ? "color:var(--shu);font-weight:700;" : "") + '">今週 ' + hmm(wsum) + " / 目安 " + cfg.weekTarget + "時間" +
+        (over ? "(" + hmm(wsum - cfg.weekTarget * 60) + " 超えています)" : "(あと " + hmm(cfg.weekTarget * 60 - wsum) + ")") + "</div>";
+    }
+  }
+  if (msg) h += '<div style="margin-top:10px;padding:8px 10px;border:1px solid var(--ok);color:var(--ok);font-weight:700;">' + esc(msg) + "</div>";
+  h += '<div class="punchbtns">';
+  if (st.st === "off") {
+    h += '<button class="btn primary" data-pt="in">出勤</button>' +
+      '<button class="btn" data-pt="in" data-kind="trip">外出・仕入れで出勤</button>';
+  } else if (st.st === "work") {
+    h += '<button class="btn" data-pt="bs">休憩に入る</button><button class="btn primary" data-pt="out">退勤</button>';
+  } else {
+    h += '<button class="btn primary" data-pt="be">休憩から戻る</button><button class="btn ghost" data-pt="out">休憩から戻らずに退勤</button>';
+  }
+  if (tripToday) h += '<button class="btn" id="btnReport">' + (reported ? "仕入れの報告を書き足す" : "仕入れの報告を書く") + "</button>";
+  h += "</div>";
+  h += '<div style="font-size:12px;color:var(--dim);">時刻はサーバーの時計で記録されます。打ち忘れ・押し間違いは、勤怠タブの月の表から「修正の申請」をしてください。</div>';
+  h += '<div class="dlgbtns" style="margin-top:14px;"><button class="btn ghost" id="attClose">閉じる</button></div>';
+  box.innerHTML = h;
+  if (!dlgAtt.open) dlgAtt.showModal();
+  document.getElementById("attClose").onclick = () => { dlgAtt.close(); attSess = null; render(); };
+  box.querySelectorAll("[data-pt]").forEach(b => b.onclick = async () => {
+    const s = sessFor(staffId);
+    if (!s) { dlgAtt.close(); openPunch(staffId); return; }
+    const type = b.dataset.pt;
+    if (type === "out" && st.shift && st.shift.kind === "trip" && !reported) {
+      if (!confirm("外出・仕入れの日です。仕入れの報告がまだですが、退勤しますか?(報告は退勤後も今日中なら書けます)")) return;
+    }
+    b.disabled = true;
+    try {
+      const out = await attPost("/att/punch", { staff: staffId, pin: s.pin, type, kind: b.dataset.kind });
+      s.until = Date.now() + 120000;
+      ATT.punches.push(out.punch); saveAtt();
+      renderPunchBox(staffId, PUNCH_NAME[type] + (b.dataset.kind === "trip" ? "(外出・仕入れ)" : "") + " を " + jstHM(out.punch.ts) + " に記録しました");
+      fetchAtt();
+    } catch (e) { alert("打刻できませんでした:\n" + e.message + "\n\n通信が戻らない時は、時刻を紙にメモして、あとで「修正の申請」をしてください。"); b.disabled = false; }
+  });
+  const br = document.getElementById("btnReport");
+  if (br) br.onclick = () => openReport(staffId);
+}
+/* ---- 仕入れの報告 ---- */
+function openReport(staffId) {
+  const day = jstDate(attNow());
+  const box = document.getElementById("attBox");
+  box.innerHTML = '<div style="font-size:18px;font-weight:700;">仕入れの報告(' + md(day) + ")</div>" +
+    '<div style="font-size:12px;color:var(--dim);margin-top:2px;">短くてかまいません。書く時間も勤務時間です。</div>' +
+    '<div class="attform">' +
+    '<label>① 見たもの・買ったもの(産地・ロット・量・値段・前回との違い)</label><textarea id="rpSeen"></textarea>' +
+    '<label>② 聞いた話(「へぇ」と思ったことを一つ)</label><textarea id="rpHeard"></textarea>' +
+    '<label>③ 店で試すこと(一つ。翌月の審査会で確かめます)</label><textarea id="rpTry"></textarea>' +
+    '<label>④ 次も行く必要はありますか</label><select id="rpNext"><option value="">選んでください</option><option>次も行きたい</option><option>次は配達で十分</option><option>しばらく先でよい</option></select>' +
+    "</div>" +
+    '<div class="dlgbtns" style="margin-top:14px;"><button class="btn ghost" id="rpNo">戻る</button><button class="btn primary" id="rpYes">送る</button></div>';
+  document.getElementById("rpNo").onclick = () => renderPunchBox(staffId);
+  document.getElementById("rpYes").onclick = async () => {
+    const report = { day, seen: document.getElementById("rpSeen").value.trim(), heard: document.getElementById("rpHeard").value.trim(),
+      try: document.getElementById("rpTry").value.trim(), next: document.getElementById("rpNext").value };
+    if (!report.seen && !report.heard && !report.try) { alert("①〜③のどれかを書いてください"); return; }
+    let s = sessFor(staffId);
+    if (!s) { const r = await askPin("仕入れの報告を送る", staffId); if (!r) return; s = attSess = { id: staffId, pin: r.pin, until: Date.now() + 120000 }; }
+    try {
+      const out = await attPost("/att/punch", { staff: staffId, pin: s.pin, type: "report", report });
+      ATT.punches.push(out.punch); saveAtt();
+      renderPunchBox(staffId, "仕入れの報告を送りました");
+    } catch (e) { alert("送れませんでした:\n" + e.message); }
+  };
+}
+/* ---- 修正の申請 ---- */
+function openFix(staffId, date) {
+  if (attLocked(date.slice(0, 7))) { alert(date.slice(0, 7) + " の勤怠は確定済みです。承認する人に「確定を解除」してもらってください。"); return; }
+  const ps = attEffective(staffId).filter(p => jstDate(p.ts) === date);
+  const pend = ATT.fixes.filter(f => f.status === "pending" && f.staff === staffId && [f.ts, f.oldTs].some(t => t && jstDate(t) === date));
+  const box = document.getElementById("attBox");
+  let h = '<div style="font-size:18px;font-weight:700;">' + esc(staffName(staffId)) + " さん " + dlabel(date) + "</div>";
+  h += '<div style="font-size:13px;color:var(--dim);margin:4px 0 8px;">直したい打刻を選ぶか、抜けている打刻を足してください。承認する人が承認すると反映されます。元の記録は消えません。</div>';
+  h += '<div class="attform"><label>直すもの</label><select id="fxTarget">';
+  for (const p of ps) h += '<option value="' + esc(p.id) + '">' + PUNCH_NAME[p.type] + (p.kind === "trip" ? "(外出・仕入れ)" : "") + " " + jstHM(p.ts) + (p.fixed ? "(修正済み)" : "") + "</option>";
+  h += '<option value="_add">打刻を足す(打ち忘れ)</option></select>';
+  h += '<div id="fxAddBox"><label>足す打刻の種類</label><select id="fxType"><option value="in">出勤</option><option value="in_trip">出勤(外出・仕入れ)</option><option value="bs">休憩に入る</option><option value="be">休憩から戻る</option><option value="out">退勤</option></select></div>';
+  h += '<div id="fxActBox"><label>どう直す</label><select id="fxAct"><option value="change">時刻を変える</option><option value="delete">この打刻を取り消す(押し間違い)</option></select></div>';
+  h += '<div id="fxTimeBox"><label>正しい時刻</label><div style="display:flex;gap:8px;"><input id="fxDate" type="date" value="' + date + '"><input id="fxTime" type="time" value=""></div></div>';
+  h += '<label>理由(必ず書いてください)</label><textarea id="fxReason" placeholder="例:出勤を押し忘れた。仕込みを始めた時刻"></textarea></div>';
+  if (pend.length) h += '<div style="font-size:13px;margin-top:10px;">この日の承認待ち:' + pend.map(f => esc(fixLabel(f))).join("、") + "</div>";
+  h += '<div class="dlgbtns" style="margin-top:14px;"><button class="btn ghost" id="fxNo">やめる</button><button class="btn primary" id="fxYes">申請する</button></div>';
+  box.innerHTML = h;
+  if (!dlgAtt.open) dlgAtt.showModal();
+  const tg = document.getElementById("fxTarget"), act = document.getElementById("fxAct");
+  const sync = () => {
+    const add = tg.value === "_add";
+    document.getElementById("fxAddBox").style.display = add ? "" : "none";
+    document.getElementById("fxActBox").style.display = add ? "none" : "";
+    document.getElementById("fxTimeBox").style.display = (!add && act.value === "delete") ? "none" : "";
+    if (!add) { const p = ps.find(x => x.id === tg.value); if (p) { document.getElementById("fxTime").value = jstHM(p.ts); document.getElementById("fxDate").value = jstDate(p.ts); } }
+  };
+  tg.onchange = sync; act.onchange = sync; sync();
+  document.getElementById("fxNo").onclick = () => { dlgAtt.close(); render(); };
+  document.getElementById("fxYes").onclick = async () => {
+    const reason = document.getElementById("fxReason").value.trim();
+    if (!reason) { alert("理由を書いてください"); return; }
+    const fix = { reason };
+    if (tg.value === "_add") {
+      const t = document.getElementById("fxType").value;
+      fix.action = "add"; fix.type = t === "in_trip" ? "in" : t; if (t === "in_trip") fix.kind = "trip";
+    } else { fix.action = act.value; fix.punchId = tg.value; }
+    if (fix.action !== "delete") {
+      const d = document.getElementById("fxDate").value, t = document.getElementById("fxTime").value;
+      if (!d || !t) { alert("正しい日付と時刻を入れてください"); return; }
+      fix.ts = jstTs(d, t);
+      if (fix.ts > attNow()) { alert("未来の時刻は入れられません"); return; }
+    }
+    let s = sessFor(staffId);
+    if (!s) { const r = await askPin("修正の申請", staffId); if (!r) return; s = attSess = { id: staffId, pin: r.pin, until: Date.now() + 120000 }; }
+    try {
+      const out = await attPost("/att/fix", { staff: staffId, pin: s.pin, fix });
+      ATT.fixes.push(out.fix); saveAtt();
+      dlgAtt.close(); attSess = null;
+      alert("修正を申請しました。承認されると反映されます。\n" + fixLabel(out.fix));
+      render(); fetchAtt().then(() => { if (view.tab === "att") render(); });
+    } catch (e) { alert("申請できませんでした:\n" + e.message); }
+  };
+}
+/* ---- 1日の打刻の詳細(月の表の行をタップ) ---- */
+function openDay(staffId, date) {
+  const day = attDaily(staffId)[date];
+  const box = document.getElementById("attBox");
+  let h = '<div style="font-size:18px;font-weight:700;">' + esc(staffName(staffId)) + " さん " + dlabel(date) + "</div>";
+  const ps = attEffective(staffId).filter(p => jstDate(p.ts) === date);
+  h += '<table class="atttbl" style="margin-top:8px;"><tr><th class="l">打刻</th><th>時刻</th><th class="l">備考</th></tr>';
+  for (const p of ps) h += '<tr><td class="l">' + PUNCH_NAME[p.type] + (p.kind === "trip" ? "(外出・仕入れ)" : "") + "</td><td>" + jstHM(p.ts) + '</td><td class="l">' + (p.fixed ? "修正で反映" : "") + "</td></tr>";
+  if (!ps.length) h += '<tr><td class="l" colspan="3">打刻はありません</td></tr>';
+  h += "</table>";
+  if (day) {
+    h += '<div style="font-size:14px;margin-top:10px;">労働 ' + hmm(day.labor) + "・休憩 " + hmm(day.brk) + (day.gap ? "・中抜け " + hmm(day.gap) : "") +
+      "・時間外 " + hmm(day.ot) + (day.hol ? "・休日労働 " + hmm(day.hol) : "") + (day.night ? "・深夜 " + hmm(day.night) : "") + "</div>";
+    for (const n of day.notes) h += '<div class="w" style="color:var(--shu);font-size:13px;margin-top:4px;">' + esc(n) + "</div>";
+  }
+  const hist = ATT.fixes.filter(f => f.staff === staffId && [f.ts, f.oldTs].some(t => t && jstDate(t) === date)).sort((a, b) => a.reqAt - b.reqAt);
+  if (hist.length) {
+    h += '<div style="font-size:13px;font-weight:700;margin-top:12px;">修正の履歴</div>';
+    for (const f of hist) h += '<div style="font-size:13px;border-top:1px solid var(--rule);padding:4px 0;">' + esc(fixLabel(f)) + "<br><span style=\"color:var(--dim)\">理由:" + esc(f.reason) +
+      " / 申請 " + md(jstDate(f.reqAt)) + " " + jstHM(f.reqAt) + " / " + ({ pending: "承認待ち", approved: "承認", rejected: "却下" })[f.status] +
+      (f.decidedAt ? "(" + esc(staffName(f.decidedBy)) + " " + md(jstDate(f.decidedAt)) + " " + jstHM(f.decidedAt) + ")" : "") + "</span></div>";
+  }
+  const reps = attReports().filter(p => p.staff === staffId && p.report.day === date);
+  for (const p of reps) h += reportHtml(p);
+  h += '<div class="dlgbtns" style="margin-top:14px;"><button class="btn ghost" id="dyNo">閉じる</button>' +
+    (attLocked(date.slice(0, 7)) ? "" : '<button class="btn primary" id="dyFix">修正を申請する</button>') + "</div>";
+  box.innerHTML = h;
+  if (!dlgAtt.open) dlgAtt.showModal();
+  document.getElementById("dyNo").onclick = () => dlgAtt.close();
+  const bf = document.getElementById("dyFix");
+  if (bf) bf.onclick = () => openFix(staffId, date);
+}
+function reportHtml(p) {
+  const r = p.report;
+  return '<div style="border:1px solid var(--rule);background:#fff;padding:8px 10px;margin-top:10px;font-size:14px;">' +
+    '<div style="font-weight:700;">仕入れの報告 ' + md(r.day) + " " + esc(staffName(p.staff)) + ' <span style="font-weight:400;color:var(--dim);font-size:12px;">' + jstHM(p.ts) + " 送信</span></div>" +
+    (r.seen ? "<div>① " + esc(r.seen) + "</div>" : "") + (r.heard ? "<div>② " + esc(r.heard) + "</div>" : "") +
+    (r.try ? "<div>③ " + esc(r.try) + "</div>" : "") + (r.next ? "<div>④ " + esc(r.next) + "</div>" : "") + "</div>";
+}
+/* ---- スタッフの登録・変更 ---- */
+function openStaffForm(staffId) {
+  const first = !ATT.staff.length;
+  const s = staffId ? ATT.staff.find(x => x.id === staffId) : null;
+  const box = document.getElementById("attBox");
+  let h = '<div style="font-size:18px;font-weight:700;">' + (first ? "最初の登録(承認する人)" : s ? esc(s.name) + " さんの登録内容" : "スタッフを追加") + "</div>";
+  if (first) h += '<div style="font-size:13px;color:var(--dim);margin-top:4px;">最初に登録する人が「承認する人」(修正の承認・月の確定・設定の変更をする人)になります。前川さんを登録してください。</div>';
+  h += '<div class="attform"><label>名前</label><input id="sfName" value="' + esc(s ? s.name : "") + '"' + (s ? " " : "") + ">";
+  if (!first) h += '<label>役割</label><select id="sfRole"><option value="staff"' + (s && s.role === "owner" ? "" : " selected") + '>スタッフ</option><option value="owner"' + (s && s.role === "owner" ? " selected" : "") + ">承認する人</option></select>";
+  if (s) h += '<label>在籍</label><select id="sfActive"><option value="1"' + (s.active !== false ? " selected" : "") + '>在籍</option><option value="0"' + (s.active === false ? " selected" : "") + ">退職(打刻の一覧から外す)</option></select>";
+  h += '<label>' + (s ? "新しい暗証番号(変えない時は空のまま)" : "暗証番号(数字4〜8桁・本人が決めて入れてください)") + '</label><input id="sfPin" type="password" inputmode="numeric" autocomplete="off">' +
+    '<label>もう一度</label><input id="sfPin2" type="password" inputmode="numeric" autocomplete="off"></div>';
+  h += '<div style="font-size:12px;color:var(--dim);margin-top:8px;">暗証番号はサーバーに暗号化して保存され、誰にも見えません。忘れたら、承認する人が新しい番号を入れ直せます。</div>';
+  h += '<div class="dlgbtns" style="margin-top:14px;"><button class="btn ghost" id="sfNo">やめる</button><button class="btn primary" id="sfYes">保存する</button></div>';
+  box.innerHTML = h;
+  if (!dlgAtt.open) dlgAtt.showModal();
+  document.getElementById("sfNo").onclick = () => dlgAtt.close();
+  document.getElementById("sfYes").onclick = async () => {
+    const name = document.getElementById("sfName").value.trim();
+    const pin = document.getElementById("sfPin").value.trim(), pin2 = document.getElementById("sfPin2").value.trim();
+    if (!name) { alert("名前を入れてください"); return; }
+    if ((!s || pin) && !/^\d{4,8}$/.test(pin)) { alert("暗証番号は数字4〜8桁にしてください"); return; }
+    if (pin !== pin2) { alert("暗証番号が2回で違います"); return; }
+    const staff = { name };
+    if (s) staff.id = s.id;
+    const rs = document.getElementById("sfRole"); if (rs) staff.role = rs.value;
+    const ra = document.getElementById("sfActive"); if (ra) staff.active = ra.value === "1";
+    let auth = {};
+    if (!first) {
+      if (s) {
+        const changesAdmin = staff.name !== s.name || staff.role !== s.role || staff.active !== (s.active !== false);
+        if (changesAdmin) {
+          const r = await askPin("承認する人の暗証番号", "owner", "名前・役割・在籍の変更は承認する人だけができます");
+          if (!r) return;
+          auth = { id: r.id, pin: r.pin };
+        } else {
+          /* 暗証番号だけ変える:本人の今の番号か、承認する人の番号(忘れた時) */
+          const who = [s.id, ...owners().map(o => o.id).filter(id => id !== s.id)];
+          const r = await askPinFrom("今の暗証番号", who, "本人の今の暗証番号を入れてください。忘れた時は、承認する人を選んでその人の番号を入れます");
+          if (!r) return;
+          auth = r.id === s.id ? { selfPin: r.pin } : { id: r.id, pin: r.pin };
+        }
+      } else {
+        const r = await askPin("承認する人の暗証番号", "owner", "スタッフを追加するには、承認する人の暗証番号が要ります");
+        if (!r) return;
+        auth = { id: r.id, pin: r.pin };
+      }
+    }
+    try {
+      await attPost("/att/staff", { staff, pin: pin || undefined, auth });
+      dlgAtt.close();
+      await fetchAtt(); render();
+      alert(first ? name + " さんを「承認する人」として登録しました。次はスタッフを追加してください。" : "保存しました");
+    } catch (e) { alert("保存できませんでした:\n" + e.message); }
+  };
+}
+/* ---- 勤怠の設定 ---- */
+function openAttCfg() {
+  const c = attCfg();
+  const box = document.getElementById("attBox");
+  const dsel = (id, v, extra) => '<select id="' + id + '">' + (extra || "") + [0, 1, 2, 3, 4, 5, 6].map(i => '<option value="' + i + '"' + (v === i ? " selected" : "") + ">" + DOWJ[i] + "曜</option>").join("") + "</select>";
+  box.innerHTML = '<div style="font-size:18px;font-weight:700;">勤怠の設定</div>' +
+    '<div class="attform">' +
+    '<label>週の労働時間の上限</label><select id="cfLimit"><option value="44"' + (c.weekLimit === 44 ? " selected" : "") + '>44時間(飲食店で常時10人未満=特例措置対象事業場)</option><option value="40"' + (c.weekLimit === 40 ? " selected" : "") + ">40時間(10人以上になった時・特例が廃止された時)</option></select>" +
+    '<label>店の目安(この時間を超えた週に警告。割増の計算には使いません)</label><select id="cfTarget">' + [40, 38, 36, 32, 30, 0].map(v => '<option value="' + v + '"' + (c.weekTarget === v ? " selected" : "") + ">" + (v ? "週" + v + "時間" : "目安なし") + "</option>").join("") + "</select>" +
+    "<label>1週間の始まり</label>" + dsel("cfStart", c.weekStart) +
+    "<label>法定休日(この曜日の労働は休日労働・35%増し)</label>" + dsel("cfHol", c.legalHoliday, '<option value="-1"' + (c.legalHoliday === -1 ? " selected" : "") + ">決めない</option>") +
+    '<label>休憩時間の給料</label><select id="cfPaid"><option value="1"' + (c.breakPaid ? " selected" : "") + '>有給(休憩も時給を払う)</option><option value="0"' + (!c.breakPaid ? " selected" : "") + ">無給</option></select>" +
+    "</div>" +
+    '<div style="font-size:12px;color:var(--dim);margin-top:8px;">雇用契約書・就業規則と同じにしてください。変更すると、過去の月の計算も新しい設定でやり直されます(確定済みの月の控えは変わりません)。変更の記録は残ります。</div>' +
+    '<div class="dlgbtns" style="margin-top:14px;"><button class="btn ghost" id="cfNo">やめる</button><button class="btn primary" id="cfYes">保存する</button></div>';
+  if (!dlgAtt.open) dlgAtt.showModal();
+  document.getElementById("cfNo").onclick = () => dlgAtt.close();
+  document.getElementById("cfYes").onclick = async () => {
+    const cfg = { weekLimit: Number(document.getElementById("cfLimit").value), weekStart: Number(document.getElementById("cfStart").value),
+      legalHoliday: Number(document.getElementById("cfHol").value), breakPaid: document.getElementById("cfPaid").value === "1",
+      weekTarget: Number(document.getElementById("cfTarget").value) };
+    const r = await askPin("承認する人の暗証番号", "owner", "設定の変更は承認する人だけができます");
+    if (!r) return;
+    try { await attPost("/att/cfg", { cfg, auth: r }); dlgAtt.close(); await fetchAtt(); render(); }
+    catch (e) { alert("保存できませんでした:\n" + e.message); }
+  };
+}
+/* ---- 月の勤怠CSV ---- */
+function attCsvText(ym) {
+  const c = attCfg();
+  const rows = [["木琴 勤怠 " + ym], ["設定", "週の上限 " + c.weekLimit + "時間", "店の目安 " + (c.weekTarget ? "週" + c.weekTarget + "時間" : "なし"), "週の始まり " + DOWJ[c.weekStart] + "曜", "法定休日 " + (c.legalHoliday >= 0 ? DOWJ[c.legalHoliday] + "曜" : "なし"), "休憩 " + (c.breakPaid ? "有給" : "無給")],
+    ["時間の単位は分。労働時間=出勤〜退勤−休憩。所定内=労働時間−時間外−休日労働。賃金の対象=労働時間+有給の休憩"], [],
+    ["スタッフ", "日付", "曜日", "区分", "出勤", "退勤", "休憩", "中抜け", "労働時間", "所定内", "時間外", "休日労働", "深夜", "有給の休憩", "賃金の対象", "修正あり", "注意"]];
+  const sums = [];
+  for (const s of ATT.staff) {
+    const days = attMonthDays(s.id, ym);
+    if (!days.length) continue;
+    for (const d of days) {
+      const done = d.shifts.filter(x => x.out || x.ongoing);
+      rows.push([s.name, d.date, DOWJ[jstDow(d.date)], d.holiday ? "法定休日" : d.trip ? "外出・仕入れ" : "通常",
+        done.map(x => jstHM(x.in)).join(" / "), done.map(x => x.out ? jstHM(x.out) : "勤務中").join(" / "),
+        d.brk, d.gap, d.labor, d.within, d.ot, d.hol, d.night, d.paidBrk, d.payMin, d.fixed ? "あり" : "", d.notes.join(" / ")]);
+    }
+    const t = attMonthSum(days);
+    sums.push([s.name, t.days, t.labor, hmm(t.labor), t.within, t.ot, hmm(t.ot), t.hol, t.night, t.paidBrk, t.payMin, hmm(t.payMin), t.trip, t.ot > 3600 ? "時間外が月60時間超(超えた分は50%増し)" : ""]);
+  }
+  rows.push([], ["月の合計"], ["スタッフ", "出勤日数", "労働時間(分)", "労働時間", "所定内(分)", "時間外(分)", "時間外", "休日労働(分)", "深夜(分)", "有給の休憩(分)", "賃金の対象(分)", "賃金の対象", "外出・仕入れの日数", "注意"]);
+  for (const r of sums) rows.push(r);
+  const fx = ATT.fixes.filter(f => [f.ts, f.oldTs].some(t => t && jstDate(t).startsWith(ym))).sort((a, b) => a.reqAt - b.reqAt);
+  rows.push([], ["修正の履歴"], ["スタッフ", "内容", "理由", "申請日時", "結果", "承認した人", "承認日時"]);
+  for (const f of fx) rows.push([staffName(f.staff), fixLabel(f), f.reason, jstDate(f.reqAt) + " " + jstHM(f.reqAt), ({ pending: "承認待ち", approved: "承認", rejected: "却下" })[f.status], f.decidedBy ? staffName(f.decidedBy) : "", f.decidedAt ? jstDate(f.decidedAt) + " " + jstHM(f.decidedAt) : ""]);
+  rows.push([], ["仕入れの報告"], ["スタッフ", "日", "①見たもの・買ったもの", "②聞いた話", "③店で試すこと", "④次も行く必要", "送信日時"]);
+  for (const p of attReports(ym)) rows.push([staffName(p.staff), p.report.day, p.report.seen, p.report.heard, p.report.try, p.report.next, jstDate(p.ts) + " " + jstHM(p.ts)]);
+  return rows.map(r => r.map(csvCell).join(",")).join("\n");
+}
+async function decideFix(f, decision) {
+  const r = await askPin(decision === "approve" ? "修正を承認する" : "修正を却下する", "owner", fixLabel(f) + "\n理由:" + f.reason);
+  if (!r) return;
+  try { await attPost("/att/decide", { fixId: f.id, decision, auth: r }); await fetchAtt(); render(); }
+  catch (e) { alert("できませんでした:\n" + e.message); }
+}
+
+/* ---- 勤怠タブ ---- */
+function renderAttend() {
+  const now = attNow();
+  const T = jstDate(now);
+  let h = "";
+  if (attErr) h += '<div class="warn">' + esc(attErr) + "</div>";
+  if (!ATT.loaded && !attErr) { main.innerHTML = '<div class="empty">勤怠の記録を読み込んでいます…</div>'; return; }
+  h += '<div class="attclock num"><span id="attClockT">' + jstHM(now, true) + "</span><small>" + dlabel(T) + "・サーバーの時刻</small></div>";
+  if (!ATT.staff.length) {
+    h += '<section class="block"><h2>はじめに</h2><div class="attnote" style="font-size:14px;color:var(--ink);">まだ誰も登録されていません。最初に、承認する人(前川さん)を登録してください。</div>' +
+      '<div style="padding:0 12px 12px;"><button class="btn primary" id="btnFirst" style="width:100%;">承認する人を登録する</button></div></section>';
+    main.innerHTML = h;
+    document.getElementById("btnFirst").onclick = () => openStaffForm(null);
+    return;
+  }
+  /* 打刻 */
+  h += '<section class="block"><h2>打刻 <span class="note">自分の名前を押して、暗証番号を入れてください</span></h2><div class="attstaff">';
+  for (const s of activeStaff()) {
+    const st = attState(s.id);
+    h += '<button data-punch="' + esc(s.id) + '" class="' + st.st + '"><b>' + esc(s.name) + "</b><span>" +
+      (st.st === "work" ? "勤務中 " + jstHM(st.shift.in) + "〜" : st.st === "brk" ? "休憩中" : "−") + "</span></button>";
+  }
+  h += "</div></section>";
+  /* 今日 */
+  const cfg = attCfg();
+  h += '<section class="block"><h2>今日(' + md(T) + ')</h2><table class="atttbl"><tr><th class="l">名前</th><th>出勤</th><th>退勤</th><th>休憩</th><th>労働</th><th>今週</th></tr>';
+  let anyToday = false;
+  for (const s of activeStaff()) {
+    const d = attDaily(s.id)[T];
+    if (!d) continue;
+    anyToday = true;
+    const done = d.shifts;
+    h += '<tr class="tap" data-day="' + esc(s.id) + "|" + T + '"><td class="l">' + esc(s.name) + (d.trip ? " 🚗" : "") + "</td><td>" + done.map(x => jstHM(x.in)).join("/") + "</td><td>" +
+      done.map(x => x.out ? jstHM(x.out) : "−").join("/") + "</td><td>" + hmm(d.brk) + "</td><td>" + hmm(d.labor) + '</td><td class="' + ((cfg.weekTarget > 0 && d.weekAll > cfg.weekTarget * 60) || d.weekSoFar > cfg.weekLimit * 60 ? "w" : "") + '">' + hmm(d.weekAll) + "</td></tr>";
+    if (d.notes.length) h += '<tr><td colspan="6" class="l w" style="border-top:none;padding-top:0;white-space:normal;">' + d.notes.map(esc).join("<br>") + "</td></tr>";
+  }
+  if (!anyToday) h += '<tr><td class="l" colspan="6" style="color:var(--dim)">今日の打刻はまだありません</td></tr>';
+  h += '</table><div class="attnote">「今週」は' + DOWJ[cfg.weekStart] + "曜から数えた、今週働いた時間の合計" + (cfg.weekTarget > 0 ? "(目安 " + cfg.weekTarget + "時間・法律の上限 " + cfg.weekLimit + "時間)" : "(法律の上限 " + cfg.weekLimit + "時間)") + "。行を押すと打刻の詳細と修正の申請。🚗=外出・仕入れ</div></section>";
+  /* 承認待ち */
+  const pend = ATT.fixes.filter(f => f.status === "pending").sort((a, b) => a.reqAt - b.reqAt);
+  if (pend.length) {
+    h += '<section class="block"><h2 style="color:var(--shu);">修正の承認待ち(' + pend.length + "件)</h2>";
+    for (const f of pend) h += '<div class="fixcard"><b>' + esc(staffName(f.staff)) + "</b> " + esc(fixLabel(f)) + '<div class="r">理由:' + esc(f.reason) + " / 申請 " + md(jstDate(f.reqAt)) + " " + jstHM(f.reqAt) + "</div>" +
+      '<div class="b"><button class="btn primary" data-appr="' + esc(f.id) + '">承認</button><button class="btn ghost" data-rej="' + esc(f.id) + '">却下</button></div></div>';
+    h += "</section>";
+  }
+  /* 月の勤怠 */
+  const months = attMonths();
+  if (!view.attMonth || !months.includes(view.attMonth)) view.attMonth = months[0];
+  const ym = view.attMonth;
+  const stList = ATT.staff.filter(s => s.active !== false || attMonthDays(s.id, ym).length);
+  if (!view.attStaff || !stList.some(s => s.id === view.attStaff)) view.attStaff = (stList.find(s => s.role !== "owner") || stList[0] || {}).id;
+  const locked = ATT.meta["attlock:" + ym] ? JSON.parse(ATT.meta["attlock:" + ym]) : null;
+  h += '<section class="block"><h2>月の勤怠' + (locked ? ' <span class="note" style="color:var(--ok);font-weight:700;">確定済み</span>' : "") + "</h2>" +
+    '<div style="display:flex;gap:8px;padding:10px 12px 4px;flex-wrap:wrap;"><select id="attYm" style="padding:8px;font-size:16px;border:1px solid var(--ink);background:#fff;">' +
+    months.map(m => '<option value="' + m + '"' + (m === ym ? " selected" : "") + ">" + m.replace("-", "年") + "月</option>").join("") + "</select>" +
+    '<select id="attWho" style="padding:8px;font-size:16px;border:1px solid var(--ink);background:#fff;">' +
+    stList.map(s => '<option value="' + esc(s.id) + '"' + (s.id === view.attStaff ? " selected" : "") + ">" + esc(s.name) + (s.active === false ? "(退職)" : "") + "</option>").join("") + "</select></div>";
+  const days = view.attStaff ? attMonthDays(view.attStaff, ym) : [];
+  h += '<div style="overflow-x:auto;"><table class="atttbl"><tr><th class="l">日</th><th>出勤〜退勤</th><th>休憩</th><th>労働</th><th>時間外</th><th>休日</th><th>深夜</th></tr>';
+  for (const d of days) {
+    const done = d.shifts;
+    h += '<tr class="tap" data-day="' + esc(view.attStaff) + "|" + d.date + '"><td class="l' + (d.notes.length ? " w" : "") + '">' + md(d.date) + (d.trip ? " 🚗" : "") + (d.fixed ? " 修" : "") + (d.notes.length ? " ⚠" : "") + "</td><td>" +
+      done.map(x => jstHM(x.in) + "〜" + (x.out ? jstHM(x.out) : "")).join(" ") + "</td><td>" + hmm(d.brk) + "</td><td>" + hmm(d.labor) + '</td><td class="' + (d.ot ? "w" : "") + '">' + (d.ot ? hmm(d.ot) : "") +
+      '</td><td class="' + (d.hol ? "w" : "") + '">' + (d.hol ? hmm(d.hol) : "") + "</td><td>" + (d.night ? hmm(d.night) : "") + "</td></tr>";
+  }
+  if (!days.length) h += '<tr><td class="l" colspan="7" style="color:var(--dim)">この月の打刻はありません</td></tr>';
+  h += "</table></div>";
+  if (days.length) {
+    const t = attMonthSum(days);
+    h += '<div class="kv"><span>出勤日数</span><b class="num">' + t.days + "日" + (t.trip ? '<span style="font-weight:400;font-size:12px;color:var(--dim);">(うち外出・仕入れ ' + t.trip + "日)</span>" : "") + "</b></div>" +
+      '<div class="kv"><span>労働時間</span><b class="num">' + hmm(t.labor) + "</b></div>" +
+      '<div class="kv"><span>うち所定内</span><b class="num">' + hmm(t.within) + "</b></div>" +
+      '<div class="kv"><span>時間外(25%増し)</span><b class="num' + (t.ot > 3600 ? " warnv" : "") + '">' + hmm(t.ot) + "</b></div>" +
+      (t.ot > 3600 ? '<div class="attwarn">時間外が月60時間を超えています。超えた分は50%増しです</div>' : "") +
+      '<div class="kv"><span>休日労働(35%増し)</span><b class="num">' + hmm(t.hol) + "</b></div>" +
+      '<div class="kv"><span>深夜(22時〜5時・25%増し)</span><b class="num">' + hmm(t.night) + "</b></div>" +
+      (cfg.breakPaid ? '<div class="kv"><span>有給の休憩</span><b class="num">' + hmm(t.paidBrk) + "</b></div>" : "") +
+      '<div class="kv big"><span>賃金の対象になる時間</span><b class="num">' + hmm(t.payMin) + "</b></div>" +
+      (t.notes ? '<div class="attwarn">⚠ の付いた日が ' + days.filter(d => d.notes.length).length + " 日あります。行を押して確かめてください</div>" : "");
+  }
+  h += '<div class="attnote">行を押すと、打刻の詳細・修正の履歴・修正の申請。修=修正が反映された日。</div>';
+  const reps = attReports(ym);
+  if (reps.length) { h += '<div style="padding:0 12px 10px;"><div style="font-weight:700;font-size:14px;">仕入れの報告(' + reps.length + "件)</div>" + reps.map(reportHtml).join("") + "</div>"; }
+  const c0 = loadCfg(); const base = (c0.readerUrl || "").replace(/\/+$/, "");
+  h += '<div style="display:flex;gap:10px;padding:0 12px 12px;flex-wrap:wrap;"><button class="btn" id="btnAttCsv" style="flex:1;">この月のCSV(全員)</button>' +
+    (locked ? '<button class="btn ghost" id="btnAttUnlock" style="flex:1;">確定を解除</button>' : '<button class="btn primary" id="btnAttLock" style="flex:1;">この月を確定</button>') + "</div>";
+  if (locked) {
+    h += '<div class="attnote">確定 ' + jstDate(locked.at) + " " + jstHM(locked.at) + "(" + esc(staffName(locked.by)) + ")" +
+      (locked.keys || []).map(k => base ? ' <a target="_blank" style="color:var(--shu);" href="' + esc(base + "/photo?key=" + encodeURIComponent(k) + (c0.appKey ? "&k=" + encodeURIComponent(c0.appKey) : "")) + '">' + (k.endsWith(".csv") ? "控えCSV" : "控えJSON") + "</a>" : "").join("") + "</div>";
+  } else h += '<div class="attnote">月が終わったら、給料を計算する前に確定してください。確定すると、その月の打刻と修正は止まり、控えがクラウドに保存されます。</div>';
+  let lh = []; try { lh = JSON.parse(ATT.meta["attlockhist:" + ym] || "[]"); } catch (e) {}
+  if (lh.length) h += '<div class="attnote">確定の記録:' + lh.map(x => (x.a === "lock" ? "確定" : "解除") + " " + jstDate(x.at) + " " + jstHM(x.at) + "(" + esc(staffName(x.by)) + ")").join("、") + "</div>";
+  h += "</section>";
+  /* スタッフと設定 */
+  h += '<section class="block"><h2>スタッフと設定</h2>';
+  for (const s of ATT.staff) h += '<div class="kv"><span>' + esc(s.name) + (s.role === "owner" ? ' <span style="font-size:12px;color:var(--dim);">承認する人</span>' : "") + (s.active === false ? ' <span style="font-size:12px;color:var(--dim);">退職</span>' : "") +
+    '</span><button class="btn ghost" style="padding:4px 12px;font-size:13px;" data-staff="' + esc(s.id) + '">変更・暗証番号</button></div>';
+  h += '<div class="kv"><span>勤怠の設定</span><span style="font-size:13px;">目安 週' + (cfg.weekTarget || "−") + "時間(上限 " + cfg.weekLimit + ")・" + DOWJ[cfg.weekStart] + "曜始まり・法定休日 " + (cfg.legalHoliday >= 0 ? DOWJ[cfg.legalHoliday] + "曜" : "なし") + "・休憩 " + (cfg.breakPaid ? "有給" : "無給") + "</span></div>";
+  h += '<div style="display:flex;gap:10px;padding:10px 12px 12px;"><button class="btn" id="btnAddStaff" style="flex:1;">スタッフを追加</button><button class="btn" id="btnAttCfg" style="flex:1;">設定を変える</button></div></section>';
+  main.innerHTML = h;
+
+  main.querySelectorAll("[data-punch]").forEach(b => b.onclick = () => openPunch(b.dataset.punch));
+  main.querySelectorAll("[data-day]").forEach(r => r.onclick = () => { const [id, d] = r.dataset.day.split("|"); openDay(id, d); });
+  main.querySelectorAll("[data-appr]").forEach(b => b.onclick = () => decideFix(ATT.fixes.find(f => f.id === b.dataset.appr), "approve"));
+  main.querySelectorAll("[data-rej]").forEach(b => b.onclick = () => decideFix(ATT.fixes.find(f => f.id === b.dataset.rej), "reject"));
+  main.querySelectorAll("[data-staff]").forEach(b => b.onclick = () => openStaffForm(b.dataset.staff));
+  document.getElementById("btnAddStaff").onclick = () => openStaffForm(null);
+  document.getElementById("btnAttCfg").onclick = openAttCfg;
+  document.getElementById("attYm").onchange = e => { view.attMonth = e.target.value; render(); };
+  document.getElementById("attWho").onchange = e => { view.attStaff = e.target.value; render(); };
+  document.getElementById("btnAttCsv").onclick = () => downloadFile("木琴_勤怠_" + ym + ".csv", attCsvText(ym));
+  const bl = document.getElementById("btnAttLock");
+  if (bl) bl.onclick = async () => {
+    if (ym >= T.slice(0, 7)) { alert("確定できるのは先月以前の月だけです(今月を確定すると打刻ができなくなるため)。"); return; }
+    const pn = ATT.fixes.filter(f => f.status === "pending" && [f.ts, f.oldTs].some(t => t && jstDate(t).startsWith(ym)));
+    if (pn.length) { alert("この月の修正の申請が " + pn.length + " 件、承認待ちです。先に承認か却下をしてください。"); return; }
+    const bad = ATT.staff.reduce((a, s) => a + attMonthDays(s.id, ym).filter(d => d.notes.some(n => n.startsWith("退勤の打刻がありません"))).length, 0);
+    if (bad && !confirm("退勤の打刻がない日が " + bad + " 日あります。このまま確定しますか?(その日の労働時間は0として計算されています)")) return;
+    const r = await askPin(ym + " の勤怠を確定", "owner", "確定すると、この月の打刻・修正は止まります。控えがクラウドに保存されます。");
+    if (!r) return;
+    const files = { "attendance.csv": "﻿" + attCsvText(ym), "data.json": JSON.stringify({ month: ym, cfg: attCfg(), staff: ATT.staff,
+      punches: ATT.punches.filter(p => jstDate(p.ts).startsWith(ym) || (p.report && (p.report.day || "").startsWith(ym))),
+      fixes: ATT.fixes.filter(f => [f.ts, f.oldTs].some(t => t && jstDate(t).startsWith(ym))) }) };
+    try { await attPost("/att/lock", { month: ym, files, auth: r }); await fetchAtt(); render(); }
+    catch (e) { alert("確定できませんでした:\n" + e.message); }
+  };
+  const bu = document.getElementById("btnAttUnlock");
+  if (bu) bu.onclick = async () => {
+    const r = await askPin(ym + " の確定を解除", "owner", "解除した記録は残ります。直し終わったら、もう一度確定してください。");
+    if (!r) return;
+    try { await attPost("/att/lock", { month: ym, unlock: true, auth: r }); await fetchAtt(); render(); }
+    catch (e) { alert("解除できませんでした:\n" + e.message); }
+  };
+}
+
 /* ---- タブ ---- */
 document.getElementById("tabSlips").onclick = () => { view.tab = "slips"; view.mode = "list"; render(); refreshSoon(); };
 document.getElementById("tabStock").onclick = () => { view.tab = "stock"; view.stockDate = today(); render(); refreshSoon(); };
 document.getElementById("tabClose").onclick = () => { view.tab = "close"; render(); refreshSoon(); };
+document.getElementById("tabAtt").onclick = () => { view.tab = "att"; view.attMonth = null; render(); fetchAtt().then(() => { if (view.tab === "att") render(); }); };
 
 /* ---- パスコードロック ---- */
 (function initLock() {
@@ -2226,8 +2939,12 @@ setInterval(() => {
   if (document.visibilityState !== "visible") return;
   if (view.mode === "edit" || view.mode === "pay" || view.mode === "split") return;
   if ((dlgSettings && dlgSettings.open) || (dlgPaste && dlgPaste.open) || (dlg && dlg.open) || (dlgNum && dlgNum.open)) return;
+  if (dlgPin.open || dlgAtt.open) return;
+  if (view.tab === "att") { fetchAtt().then(() => render()); return; }
   fetchState().then(() => render());
 }, 25000);
+/* 勤怠タブの時計(画面は描き直さず、時計の文字だけ更新) */
+setInterval(() => { const el = document.getElementById("attClockT"); if (el) el.textContent = jstHM(attNow(), true); }, 1000);
 
 /* ================= QA用シナリオ(?qa=1) ================= */
 if (location.search.includes("qa=")) {
