@@ -350,6 +350,7 @@ async function handleAttend(request, env, path) {
       weekStart: Number(c.weekStart) >= 0 && Number(c.weekStart) <= 6 ? Number(c.weekStart) : 0,
       legalHoliday: Number(c.legalHoliday) >= -1 && Number(c.legalHoliday) <= 6 ? Number(c.legalHoliday) : 2,
       breakPaid: !!c.breakPaid,
+      weekTarget: Number(c.weekTarget) === 0 ? 0 : (Number(c.weekTarget) >= 20 && Number(c.weekTarget) <= 44 ? Number(c.weekTarget) : 40),
     };
     const old = await getMeta(env, "att_cfg");
     let hist = [];
