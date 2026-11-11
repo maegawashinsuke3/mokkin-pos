@@ -23,6 +23,16 @@
  *   POST /intake {rec}    在庫入庫を保存
  *   POST /intake/delete {ts} 入庫を取消
  *   POST /meta   {k,v}    釣銭準備金・金種カウント等を保存
+ *
+ * ===== 勤怠(D1・2026-11-11) =====
+ * 打刻の時刻はこのサーバーが決める(端末の時計は使わない)。打刻は消さず、直しは「修正の申請→承認」で重ねる。
+ *   GET  /att/state                        スタッフ(暗証番号は返さない)・打刻・修正・設定・月の確定
+ *   POST /att/staff  {staff, pin, auth}    スタッフの登録・変更(最初の1人は自動で「承認する人」)
+ *   POST /att/punch  {staff, pin, type, kind, report}  打刻(in/bs/be/out)と仕入れ報告(report)
+ *   POST /att/fix    {staff, pin, fix}     修正の申請(本人)
+ *   POST /att/decide {fixId, decision, auth}  修正の承認・却下(承認する人)
+ *   POST /att/cfg    {cfg, auth}           勤怠の設定(週の上限・起算日・法定休日・休憩の有給/無給)
+ *   POST /att/lock   {month, unlock, files, auth}  月の勤怠を確定(R2の attendance/<月>/ に控え)
  */
 
 const READ_PROMPT = `あなたは手書き注文票の読み取り係です。画像は蕎麦屋「木琴」のご注文票(様式 FORM: KIK-1)です。
@@ -139,6 +149,254 @@ async function handleLedger(request, env, path) {
   return json({ ok: false, error: "不明なパス: " + path }, 404);
 }
 
+/* ================= 勤怠 ================= */
+let attSchemaReady = false;
+async function ensureAttSchema(env) {
+  if (attSchemaReady) return;
+  await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS att_staff (id TEXT PRIMARY KEY, data TEXT, pinhash TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS att_punch (id TEXT PRIMARY KEY, staff TEXT, ts INTEGER, data TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS att_fix (id TEXT PRIMARY KEY, staff TEXT, data TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)"),
+  ]);
+  attSchemaReady = true;
+}
+async function pinHash(id, pin) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("mokkin-att:" + id + ":" + pin));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function newId() { return String(Date.now()) + String(Math.floor(Math.random() * 1000)).padStart(3, "0"); }
+/* 日本時間の YYYY-MM */
+function jstMonth(ts) { return new Date(ts + 9 * 3600000).toISOString().slice(0, 7); }
+async function getMeta(env, k) {
+  const r = await env.DB.prepare("SELECT v FROM meta WHERE k = ?1").bind(k).first();
+  return r ? r.v : null;
+}
+async function setMeta(env, k, v) {
+  await env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES (?1, ?2)").bind(k, v).run();
+}
+async function monthLocked(env, ts) { return !!(await getMeta(env, "attlock:" + jstMonth(ts))); }
+async function allStaff(env) {
+  const r = await env.DB.prepare("SELECT id, data, pinhash FROM att_staff").all();
+  return r.results.map(x => ({ ...JSON.parse(x.data), _hash: x.pinhash }));
+}
+/* 暗証番号の確認。role を指定すると、その役割の人であることも確かめる */
+async function checkPin(env, id, pin, role) {
+  if (!id || !pin) return null;
+  const r = await env.DB.prepare("SELECT data, pinhash FROM att_staff WHERE id = ?1").bind(String(id)).first();
+  if (!r) return null;
+  const s = JSON.parse(r.data);
+  if (s.active === false) return null;
+  if (role && s.role !== role) return null;
+  if (r.pinhash !== await pinHash(String(id), String(pin))) return null;
+  return s;
+}
+
+async function handleAttend(request, env, path) {
+  if (!env.DB) return json({ ok: false, error: "共有台帳が未設定です(WorkerにD1バインディングDBを追加してください)" }, 501);
+  await ensureAttSchema(env);
+  if (path === "/att/state" && request.method === "GET") {
+    const [st, pu, fx, mt] = await Promise.all([
+      env.DB.prepare("SELECT data FROM att_staff").all(),
+      env.DB.prepare("SELECT data FROM att_punch ORDER BY ts").all(),
+      env.DB.prepare("SELECT data FROM att_fix").all(),
+      env.DB.prepare("SELECT k, v FROM meta WHERE k = 'att_cfg' OR k = 'att_cfghist' OR k LIKE 'attlock:%' OR k LIKE 'attlockhist:%'").all(),
+    ]);
+    const meta = {};
+    for (const r of mt.results) meta[r.k] = r.v;
+    return json({
+      ok: true, now: Date.now(),
+      staff: st.results.map(r => JSON.parse(r.data)),
+      punches: pu.results.map(r => JSON.parse(r.data)),
+      fixes: fx.results.map(r => JSON.parse(r.data)),
+      meta,
+    });
+  }
+  if (request.method !== "POST") return json({ ok: false, error: "POSTで送ってください" }, 405);
+  let body;
+  try { body = await request.json(); } catch (e) { return json({ ok: false, error: "JSONではありません" }, 400); }
+  const auth = body.auth || {};
+
+  if (path === "/att/staff") {
+    const staff = await allStaff(env);
+    const inp = body.staff || {};
+    const name = String(inp.name || "").trim().slice(0, 20);
+    const pin = body.pin != null ? String(body.pin) : "";
+    if (pin && !/^\d{4,8}$/.test(pin)) return json({ ok: false, error: "暗証番号は数字4〜8桁にしてください" }, 400);
+    if (!staff.length) {
+      /* 最初の1人:承認する人(経営者)として登録 */
+      if (!name || !pin) return json({ ok: false, error: "名前と暗証番号を入れてください" }, 400);
+      const s = { id: newId(), name, role: "owner", active: true, created: Date.now() };
+      await env.DB.prepare("INSERT INTO att_staff (id, data, pinhash) VALUES (?1, ?2, ?3)").bind(s.id, JSON.stringify(s), await pinHash(s.id, pin)).run();
+      return json({ ok: true, staff: s });
+    }
+    const owner = await checkPin(env, auth.id, auth.pin, "owner");
+    if (!inp.id) {
+      /* 新しい人を登録:承認する人の暗証番号が要る */
+      if (!owner) return json({ ok: false, error: "スタッフの登録には、承認する人の暗証番号が要ります" }, 403);
+      if (!name || !pin) return json({ ok: false, error: "名前と暗証番号を入れてください" }, 400);
+      const s = { id: newId(), name, role: inp.role === "owner" ? "owner" : "staff", active: true, created: Date.now() };
+      await env.DB.prepare("INSERT INTO att_staff (id, data, pinhash) VALUES (?1, ?2, ?3)").bind(s.id, JSON.stringify(s), await pinHash(s.id, pin)).run();
+      return json({ ok: true, staff: s });
+    }
+    const cur = staff.find(s => s.id === String(inp.id));
+    if (!cur) return json({ ok: false, error: "そのスタッフが見つかりません" }, 404);
+    const self = await checkPin(env, cur.id, auth.selfPin, null);
+    if (!owner && !self) return json({ ok: false, error: "暗証番号が違います(本人か、承認する人の暗証番号が要ります)" }, 403);
+    const next = { ...cur }; delete next._hash;
+    if (owner) {
+      /* 名前・役割・在籍は承認する人だけが変えられる */
+      if (name) next.name = name;
+      if (inp.role === "owner" || inp.role === "staff") next.role = inp.role;
+      if (typeof inp.active === "boolean") next.active = inp.active;
+      const owners = staff.filter(s => s.role === "owner" && s.active !== false && s.id !== cur.id);
+      if ((next.role !== "owner" || next.active === false) && !owners.length) return json({ ok: false, error: "承認する人が一人もいなくなるので変更できません" }, 400);
+    }
+    next.updated = Date.now();
+    const hash = pin ? await pinHash(cur.id, pin) : cur._hash;
+    await env.DB.prepare("INSERT OR REPLACE INTO att_staff (id, data, pinhash) VALUES (?1, ?2, ?3)").bind(cur.id, JSON.stringify(next), hash).run();
+    return json({ ok: true, staff: next });
+  }
+
+  if (path === "/att/punch") {
+    const s = await checkPin(env, body.staff, body.pin, null);
+    if (!s) return json({ ok: false, error: "暗証番号が違います" }, 403);
+    const type = String(body.type || "");
+    if (!["in", "bs", "be", "out", "report"].includes(type)) return json({ ok: false, error: "打刻の種類が不正です" }, 400);
+    const ts = Date.now();
+    if (await monthLocked(env, ts)) return json({ ok: false, error: "今月の勤怠は確定済みです。承認する人に確定の解除を頼んでください" }, 409);
+    const p = { id: newId(), staff: s.id, type, ts };
+    if (type === "in" && body.kind === "trip") p.kind = "trip";
+    if (type === "report") {
+      const r = body.report || {};
+      p.report = {};
+      for (const k of ["day", "seen", "heard", "try", "next"]) p.report[k] = String(r[k] || "").slice(0, 2000);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(p.report.day)) p.report.day = new Date(ts + 9 * 3600000).toISOString().slice(0, 10);
+    }
+    await env.DB.prepare("INSERT INTO att_punch (id, staff, ts, data) VALUES (?1, ?2, ?3, ?4)").bind(p.id, s.id, ts, JSON.stringify(p)).run();
+    return json({ ok: true, punch: p });
+  }
+
+  if (path === "/att/fix") {
+    const s = await checkPin(env, body.staff, body.pin, null);
+    if (!s) return json({ ok: false, error: "暗証番号が違います" }, 403);
+    const f = body.fix || {};
+    const action = String(f.action || "");
+    if (!["add", "change", "delete"].includes(action)) return json({ ok: false, error: "修正の種類が不正です" }, 400);
+    const reason = String(f.reason || "").trim().slice(0, 300);
+    if (!reason) return json({ ok: false, error: "修正の理由を書いてください" }, 400);
+    const fix = { id: newId(), staff: s.id, action, reason, reqAt: Date.now(), reqBy: s.id, status: "pending" };
+    let target = null;
+    if (action !== "add") {
+      const id = String(f.punchId || "");
+      if (id.startsWith("fix-")) {
+        /* 修正で足した打刻を、さらに直す */
+        const r = await env.DB.prepare("SELECT data FROM att_fix WHERE id = ?1").bind(id.slice(4)).first();
+        if (!r) return json({ ok: false, error: "直す打刻が見つかりません" }, 404);
+        const af = JSON.parse(r.data);
+        target = { id, staff: af.staff, ts: af.ts, type: af.type };
+      } else {
+        const r = await env.DB.prepare("SELECT data FROM att_punch WHERE id = ?1").bind(id).first();
+        if (!r) return json({ ok: false, error: "直す打刻が見つかりません" }, 404);
+        target = JSON.parse(r.data);
+      }
+      if (target.staff !== s.id) return json({ ok: false, error: "本人の打刻しか直せません" }, 403);
+      /* すでに承認された修正があれば、その時刻を「元の時刻」とする */
+      const prior = (await env.DB.prepare("SELECT data FROM att_fix WHERE staff = ?1").bind(s.id).all()).results.map(x => JSON.parse(x.data))
+        .filter(x => x.status === "approved" && x.action === "change" && x.punchId === id).sort((a, b) => a.decidedAt - b.decidedAt).pop();
+      if (prior && prior.status === "approved") target.ts = prior.ts;
+      const del = (await env.DB.prepare("SELECT data FROM att_fix WHERE staff = ?1").bind(s.id).all()).results.map(x => JSON.parse(x.data))
+        .some(x => x.status === "approved" && x.action === "delete" && x.punchId === id);
+      if (del) return json({ ok: false, error: "その打刻はもう取り消されています" }, 409);
+      fix.punchId = id; fix.oldTs = target.ts; fix.type = target.type;
+      if (await monthLocked(env, target.ts)) return json({ ok: false, error: "その月の勤怠は確定済みです" }, 409);
+    }
+    if (action !== "delete") {
+      const ts = Number(f.ts);
+      if (!ts || ts > Date.now() + 60000) return json({ ok: false, error: "時刻が不正です(未来の時刻は入れられません)" }, 400);
+      if (await monthLocked(env, ts)) return json({ ok: false, error: "その月の勤怠は確定済みです" }, 409);
+      fix.ts = ts;
+      if (action === "add") {
+        if (!["in", "bs", "be", "out"].includes(String(f.type))) return json({ ok: false, error: "打刻の種類が不正です" }, 400);
+        fix.type = String(f.type);
+        if (fix.type === "in" && f.kind === "trip") fix.kind = "trip";
+      }
+    }
+    await env.DB.prepare("INSERT INTO att_fix (id, staff, data) VALUES (?1, ?2, ?3)").bind(fix.id, s.id, JSON.stringify(fix)).run();
+    return json({ ok: true, fix });
+  }
+
+  if (path === "/att/decide") {
+    const owner = await checkPin(env, auth.id, auth.pin, "owner");
+    if (!owner) return json({ ok: false, error: "承認する人の暗証番号が違います" }, 403);
+    const r = await env.DB.prepare("SELECT data FROM att_fix WHERE id = ?1").bind(String(body.fixId || "")).first();
+    if (!r) return json({ ok: false, error: "その申請が見つかりません" }, 404);
+    const fix = JSON.parse(r.data);
+    if (fix.status !== "pending") return json({ ok: false, error: "この申請はもう処理済みです" }, 409);
+    for (const t of [fix.ts, fix.oldTs]) if (t && await monthLocked(env, t)) return json({ ok: false, error: "その月の勤怠は確定済みです" }, 409);
+    fix.status = body.decision === "approve" ? "approved" : "rejected";
+    fix.decidedAt = Date.now(); fix.decidedBy = owner.id;
+    if (body.note) fix.decideNote = String(body.note).slice(0, 300);
+    await env.DB.prepare("UPDATE att_fix SET data = ?1 WHERE id = ?2").bind(JSON.stringify(fix), fix.id).run();
+    return json({ ok: true, fix });
+  }
+
+  if (path === "/att/cfg") {
+    const owner = await checkPin(env, auth.id, auth.pin, "owner");
+    if (!owner) return json({ ok: false, error: "承認する人の暗証番号が違います" }, 403);
+    const c = body.cfg || {};
+    const cfg = {
+      weekLimit: [40, 44].includes(Number(c.weekLimit)) ? Number(c.weekLimit) : 44,
+      weekStart: Number(c.weekStart) >= 0 && Number(c.weekStart) <= 6 ? Number(c.weekStart) : 0,
+      legalHoliday: Number(c.legalHoliday) >= -1 && Number(c.legalHoliday) <= 6 ? Number(c.legalHoliday) : 2,
+      breakPaid: !!c.breakPaid,
+    };
+    const old = await getMeta(env, "att_cfg");
+    let hist = [];
+    try { hist = JSON.parse(await getMeta(env, "att_cfghist") || "[]"); } catch (e) {}
+    hist.push({ at: Date.now(), by: owner.id, from: old ? JSON.parse(old) : null, to: cfg });
+    await setMeta(env, "att_cfg", JSON.stringify(cfg));
+    await setMeta(env, "att_cfghist", JSON.stringify(hist));
+    return json({ ok: true, cfg });
+  }
+
+  if (path === "/att/lock") {
+    const owner = await checkPin(env, auth.id, auth.pin, "owner");
+    if (!owner) return json({ ok: false, error: "承認する人の暗証番号が違います" }, 403);
+    const month = String(body.month || "");
+    if (!/^\d{4}-\d{2}$/.test(month)) return json({ ok: false, error: "月が不正です" }, 400);
+    let hist = [];
+    try { hist = JSON.parse(await getMeta(env, "attlockhist:" + month) || "[]"); } catch (e) {}
+    if (body.unlock) {
+      await env.DB.prepare("DELETE FROM meta WHERE k = ?1").bind("attlock:" + month).run();
+      hist.push({ a: "unlock", at: Date.now(), by: owner.id });
+      await setMeta(env, "attlockhist:" + month, JSON.stringify(hist));
+      return json({ ok: true });
+    }
+    if (month >= jstMonth(Date.now())) return json({ ok: false, error: "確定できるのは先月以前の月だけです(今月を確定すると打刻ができなくなるため)" }, 400);
+    const pend = (await env.DB.prepare("SELECT data FROM att_fix").all()).results.map(x => JSON.parse(x.data))
+      .filter(f => f.status === "pending" && [f.ts, f.oldTs].some(t => t && jstMonth(t) === month));
+    if (pend.length) return json({ ok: false, error: "この月の修正の申請が " + pend.length + " 件、承認待ちです。先に承認か却下をしてください" }, 409);
+    const keys = [];
+    if (env.PHOTOS) {
+      const ts = Date.now();
+      for (const name in (body.files || {})) {
+        const safe = name.replace(/[^a-zA-Z0-9_.-]/g, "");
+        const key = "attendance/" + month + "/" + ts + "-" + safe;
+        const type = safe.endsWith(".csv") ? "text/csv; charset=utf-8" : "application/json; charset=utf-8";
+        await env.PHOTOS.put(key, String(body.files[name]), { httpMetadata: { contentType: type } });
+        keys.push(key);
+      }
+    }
+    const rec = { at: Date.now(), by: owner.id, keys };
+    await setMeta(env, "attlock:" + month, JSON.stringify(rec));
+    hist.push({ a: "lock", at: rec.at, by: owner.id });
+    await setMeta(env, "attlockhist:" + month, JSON.stringify(hist));
+    return json({ ok: true, lock: rec });
+  }
+  return json({ ok: false, error: "不明なパス: " + path }, 404);
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
@@ -176,6 +434,7 @@ export default {
       }
       return json({ ok: true, keys });
     }
+    if (path.startsWith("/att/")) return handleAttend(request, env, path);
     if (path === "/state" || path === "/slip" || path === "/intake" || path === "/intake/delete" || path === "/meta") {
       return handleLedger(request, env, path);
     }
