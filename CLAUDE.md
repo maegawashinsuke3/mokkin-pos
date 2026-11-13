@@ -158,6 +158,12 @@
 - API(worker.js):GET /att/state、POST /att/staff /att/punch /att/fix /att/decide /att/cfg /att/lock。テーブル att_staff / att_punch / att_fix は自動作成(既存の meta を共用)
 - テスト:Node 22 の node:sqlite で worker.js を動かすハーネス+Playwrightで、API 22項目・計算(週44h・火曜休日・深夜・中抜け)・画面の流れを確認済み
 
+## 予約アプリへの入口(2026-11-13)
+
+- タブの右端「予約↗」で、別アプリの予約管理(mokkin-yoyaku・https://mokkin-yoyaku.mokkin-yoyaku.workers.dev/ ・非公開リポジトリでClaude Codeが管理)を新しい画面で開くだけ。定数 YOYAKU_URL
+- 方針は「①入口だけ一緒にする」。データ・ログイン・サーバーは別のまま(前川さんの要望は「2つを別々に立ち上げるのが面倒」なだけのため)。埋め込み(iframe)にしないのは、別ドメインでログインのCookieがSafariで弾かれるため
+- 将来「今日の予約を注文アプリに出す」等が必要になったら②(予約アプリ側に読み取り用APIを作り、mokkin-posから取得)を検討
+
 ## 支払方法
 
 - **現金のみで運用(2026-11-05)**:index.html の定数 USE_QR = false で会計画面のQR決済ボタンを非表示、全会計は「現金」として記録。締めのQR欄もQR売上が0なら非表示。QR決済を導入する時は USE_QR = true に戻すだけ(集計・CSVの現金/QR区分はそのまま残っている)

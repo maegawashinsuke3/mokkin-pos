@@ -40,6 +40,7 @@
     border-bottom: 3px solid transparent; color: var(--dim);
   }
   nav.tabs button.on { color: var(--ink); border-bottom-color: var(--shu); }
+  nav.tabs button.ext { color: var(--shu); }
   main { flex: 1; padding: 14px 14px 90px; }
 
   /* ===== slip list ===== */
@@ -251,6 +252,7 @@
     <button id="tabStock">在庫</button>
     <button id="tabClose">締め</button>
     <button id="tabAtt">勤怠</button>
+    <button id="tabYoyaku" class="ext" title="予約管理アプリを開きます">予約↗</button>
   </nav>
   <main id="main"></main>
 </div>
@@ -2908,7 +2910,11 @@ function renderAttend() {
 document.getElementById("tabSlips").onclick = () => { view.tab = "slips"; view.mode = "list"; render(); refreshSoon(); };
 document.getElementById("tabStock").onclick = () => { view.tab = "stock"; view.stockDate = today(); render(); refreshSoon(); };
 document.getElementById("tabClose").onclick = () => { view.tab = "close"; render(); refreshSoon(); };
-document.getElementById("tabAtt").onclick = () => { view.tab = "att"; view.attMonth = null; render(); fetchAtt().then(() => { if (view.tab === "att") render(); }); };
+/* 予約管理アプリ(別アプリ mokkin-yoyaku)を開く。①入口だけ一緒にする方式(2026-11-13)。
+   別ドメインでログインの仕組みも別なので、埋め込まず新しい画面で開く。注文アプリの画面はそのまま残る */
+const YOYAKU_URL = "https://mokkin-yoyaku.mokkin-yoyaku.workers.dev/";
+document.getElementById("tabYoyaku").onclick = () => { window.open(YOYAKU_URL, "mokkin_yoyaku"); };
+document.getElementById("tabAtt").onclick =() => { view.tab = "att"; view.attMonth = null; render(); fetchAtt().then(() => { if (view.tab === "att") render(); }); };
 
 /* ---- パスコードロック ---- */
 (function initLock() {
