@@ -249,6 +249,7 @@
   </header>
   <nav class="tabs">
     <button id="tabSlips" class="on">伝票</button>
+    <button id="tabBoil">茹で</button>
     <button id="tabStock">在庫</button>
     <button id="tabClose">締め</button>
     <button id="tabAtt">勤怠</button>
@@ -409,7 +410,7 @@ const STOCK_ITEMS = [
   { id: "S_NIRA",   name: "ニラ",       unit: "人前", type: "carry" },
   { id: "S_TORORO", name: "とろろ",     unit: "人前", type: "carry" },
   { id: "S_EGG",    name: "生卵",       unit: "個",  type: "carry" },
-  { id: "S_DASHI",  name: "出汁巻き卵", unit: "人前", type: "carry" },
+  { id: "S_DASHI",  name: "出汁巻き卵", unit: "人前", type: "carry", retired: true }, // 2026-11-25 廃止:出汁巻き卵は注文ごとに生卵2個から作る(下の goodsRecipe)
   { id: "S_GAKI",   name: "蕎麦がき",   unit: "人前", type: "carry" },
   { id: "S_ZENZAI", name: "蕎麦ゼリーぜんざい", unit: "人前", type: "carry" },
   { id: "S_BEER",   name: "缶ビール",   unit: "本",  type: "carry" },
@@ -447,9 +448,12 @@ const SOBA_RECIPE = {
   6: [["S_WARM", "noodle"], ["S_TSUYU", 1], ["S_TORORO", 1], ["S_EGG", 1]],// 山かけ(温)
 };
 const GOODS_RECIPE = {
-  G1: [["S_GOHAN", 1], ["S_EGG", 1]], G2: [["S_DASHI", 1]], G3: [["S_GAKI", 1]], // 蕎麦炊きご飯は生卵1個付き
+  G1: [["S_GOHAN", 1], ["S_EGG", 1]], G2: [["S_EGG", 2]], G3: [["S_GAKI", 1]], // 蕎麦炊きご飯は生卵1個付き。出汁巻き卵は生卵2個(2026-11-25〜)
   G4: [["S_ZENZAI", 1]], G5: [["S_EGG", 1]], G6: [["S_BEER", 1]], G7: [["S_NONAL", 1]],
 };
+/* 出汁巻き卵は2026-11-24までは「作り置きの出汁巻き卵」の在庫から減らしていた。過去の伝票の計算を変えないよう、日付で切り替える */
+const DASHI_EGG_FROM = "2026-11-25";
+function goodsRecipe(key, date) { return key === "G2" && date && date < DASHI_EGG_FROM ? [["S_DASHI", 1]] : (GOODS_RECIPE[key] || []); }
 const COURSE_RECIPE = [["S_GAKI", 1], ["S_GOHAN", 1], ["S_EGG", 1], ["S_ZENZAI", 1]]; // コース1つあたり(蕎麦炊きご飯の生卵1個を含む。蕎麦はコースの蕎麦セルで消費)
 
 /* 伝票1枚の材料消費 {itemId: qty} */
@@ -465,7 +469,7 @@ function slipConsumption(slip) {
       const r = RETAIL_BY_ID[key];
       if (r) for (const [id, q] of (r.stock || [])) add(id, q * qty);
     } else if (/^G\d$/.test(key)) {
-      for (const [id, q] of (GOODS_RECIPE[key] || [])) add(id, q * qty);
+      for (const [id, q] of goodsRecipe(key, slip.date)) add(id, q * qty);
     } else {
       const row = Number(key[0]), col = key[1];
       for (const [id, q] of (SOBA_RECIPE[row] || [])) {
@@ -545,6 +549,7 @@ function noodleSim(endDate) {
     if (adj < 0) take(bs.filter(b => b.kind !== "S_ATSU" && warmOnly(b)), -adj);
     const leftStart = bs.filter(b => b.kind !== "S_ATSU" && warmOnly(b)).reduce((a, b) => a + b.qty, 0);
     // 温:まず温専用の麺(3日目の麺・温用麺)を古い順に
+    const warmPool = bs.filter(b => warmOnly(b) && b.qty > 0).sort(byOld).map(b => ({ atsu: b.kind === "S_ATSU", qty: b.qty })); // 茹で順の提案で使う(2026-11-25)
     const warm = cons.S_WARM || 0;
     let fromLeft = 0, fromAtsu = 0;
     for (const b of bs.filter(b => warmOnly(b) && b.qty > 0).sort(byOld)) {
@@ -568,7 +573,7 @@ function noodleSim(endDate) {
     const sum = f => bs.filter(f).reduce((a, b) => a + b.qty, 0);
     const end = snap();
     out[D] = {
-      inQ, warm, cold: coldN, kama, fromLeft, fromAtsu, fromHoso, coldOld, leftStart, start, end, expired,
+      inQ, warmPool, warm, cold: coldN, kama, fromLeft, fromAtsu, fromHoso, coldOld, leftStart, start, end, expired,
       hoso: sum(b => b.kind === "S_HOSO" && !warmOnly(b)),
       hira: sum(b => b.kind === "S_HIRA" && !warmOnly(b)),
       atsu: sum(b => b.kind === "S_ATSU"),
@@ -873,6 +878,8 @@ function render() {
   document.getElementById("tabStock").className = view.tab === "stock" ? "on" : "";
   document.getElementById("tabClose").className = view.tab === "close" ? "on" : "";
   document.getElementById("tabAtt").className = view.tab === "att" ? "on" : "";
+  document.getElementById("tabBoil").className = view.tab === "boil" ? "on" : "";
+  if (view.tab === "boil") { renderBoil(); return; }
   if (view.tab === "att") { renderAttend(); return; }
   if (view.tab === "close") { renderClose(); return; }
   if (view.tab === "stock") { renderStock(); return; }
@@ -1082,8 +1089,10 @@ function bump(slip, key, dir) {
   if (key === "C") {
     slip.course = Math.max(0, (slip.course || 0) + dir);
   } else {
-    const q = Math.max(0, (slip.items[key] || 0) + dir);
+    const before = slip.items[key] || 0;
+    const q = Math.max(0, before + dir);
     if (q === 0) delete slip.items[key]; else slip.items[key] = q;
+    if (q !== before) noteSobaChange(slip, key, q - before);
   }
   save(); schedulePushSlip(slip); render();
 }
@@ -1153,12 +1162,13 @@ function renderSplit() {
     const child = {
       id: genId(), date: slip.date, time: slip.time, table: slip.table, status: "open",
       people: sel.people, course: sel.C, items: {}, adjust: [], pay: null, tendered: null,
-      splitFrom: slip.id, photos: (slip.photos || []).slice(),
+      splitFrom: slip.id, photos: (slip.photos || []).slice(), ord: slipOrd(slip),
     };
     for (const k in sel.items) {
       const q = sel.items[k] || 0;
       if (!q) continue;
       child.items[k] = q;
+      moveBoiled(slip, child, k, q);
       slip.items[k] -= q;
       if (slip.items[k] <= 0) delete slip.items[k];
     }
@@ -2172,7 +2182,7 @@ function mergeIntoSlip(slip, data, photoKey) {
     const cell = String(l.cell || "").trim();
     const q = Number(l["数"] ?? l.qty) || 0;
     if (!VALID_CELLS.has(cell)) { if (cell) bad.push(cell); continue; }
-    if (q > 0) slip.items[cell] = (slip.items[cell] || 0) + q;
+    if (q > 0) { slip.items[cell] = (slip.items[cell] || 0) + q; noteSobaChange(slip, cell, q, true); }
   }
   if (photoKey) (slip.photos = slip.photos || []).push(photoKey);
   const fl = Array.isArray(data.flags) ? data.flags.map(f => "追加読み取り要確認 " + (f.cell || "") + ": " + (f["理由"] || f.reason || "")) : [];
@@ -2276,6 +2286,16 @@ function staffName(id) { const s = ATT.staff.find(x => x.id === id); return s ? 
 function activeStaff() { return ATT.staff.filter(s => s.active !== false); }
 function owners() { return activeStaff().filter(s => s.role === "owner"); }
 function attLocked(month) { return !!ATT.meta["attlock:" + month]; }
+/* 休日の振替(2026-11-19)。meta att_swaps = [{id, staff, from, to, note, at, by, status:"active"|"canceled", canceledAt, canceledBy}] */
+function attSwaps() { try { return JSON.parse(ATT.meta.att_swaps || "[]"); } catch (e) { return []; } }
+function activeSwaps(staffId) { return attSwaps().filter(x => x.status === "active" && (!staffId || x.staff === staffId)); }
+/* その日がそのスタッフの法定休日か。振替で出勤日になった元の休日は false、振り替えた先の日は true */
+function legalHolidayOf(staffId, date, cfg) {
+  const sw = activeSwaps(staffId);
+  if (sw.some(x => x.from === date)) return false;
+  if (sw.some(x => x.to === date)) return true;
+  return cfg.legalHoliday >= 0 && jstDow(date) === cfg.legalHoliday;
+}
 const PUNCH_NAME = { in: "出勤", bs: "休憩に入る", be: "休憩から戻る", out: "退勤", report: "仕入れの報告" };
 const DOWJ = "日月火水木金土";
 
@@ -2367,7 +2387,10 @@ function attDaily(staffId) {
     const dow = jstDow(d);
     const wk = addDays(d, -((dow - cfg.weekStart + 7) % 7));
     day.week = wk;
-    day.holiday = cfg.legalHoliday >= 0 && dow === cfg.legalHoliday && day.labor > 0;
+    const sws = activeSwaps(staffId);
+    day.swapWork = sws.some(x => x.from === d);   // 振替で出勤日になった元の休日
+    day.swapOff = sws.some(x => x.to === d);      // 振り替えた先の休日
+    day.holiday = legalHolidayOf(staffId, d, cfg) && day.labor > 0;
     if (day.holiday) { day.within = 0; day.ot = 0; day.hol = day.labor; }
     else {
       const dot = Math.max(0, day.labor - 480);
@@ -2394,7 +2417,7 @@ function attDaily(staffId) {
     else if (day.labor > 360 && rest < 45) day.notes.push("6時間を超えて働いたのに、休憩が45分未満です(休憩 " + rest + "分)");
     if (day.dayOt > 0) day.notes.push("1日8時間を超えています(時間外 " + hmm(day.dayOt) + ")");
     if (day.weekOt > 0) day.notes.push("週" + cfg.weekLimit + "時間を超えた分があります(時間外 " + hmm(day.weekOt) + ")");
-    if (day.holiday) day.notes.push("法定休日(" + DOWJ[cfg.legalHoliday] + "曜)の労働です(休日労働 " + hmm(day.hol) + "・35%増し)");
+    if (day.holiday) day.notes.push((day.swapOff ? "振替休日(法定休日)" : "法定休日(" + DOWJ[cfg.legalHoliday] + "曜)") + "の労働です(休日労働 " + hmm(day.hol) + "・35%増し)");
   }
   return days;
 }
@@ -2735,6 +2758,52 @@ function openAttCfg() {
     catch (e) { alert("保存できませんでした:\n" + e.message); }
   };
 }
+/* ---- 休日の振替 ---- */
+function openSwap() {
+  const cfg = attCfg();
+  if (!(cfg.legalHoliday >= 0)) { alert("法定休日が「決めない」になっているので、振替はできません。"); return; }
+  const T = jstDate(attNow());
+  const list = activeStaff();
+  const def = (list.find(s => s.role !== "owner") || list[0] || {}).id;
+  /* これから先の法定休日(8週分) */
+  let d = addDays(T, 1); while (jstDow(d) !== cfg.legalHoliday) d = addDays(d, 1);
+  const hols = []; for (let i = 0; i < 8; i++) { hols.push(d); d = addDays(d, 7); }
+  const box = document.getElementById("attBox");
+  box.innerHTML = '<div style="font-size:18px;font-weight:700;">休日を振り替える</div>' +
+    '<div style="font-size:13px;color:var(--dim);margin-top:4px;">法定休日(' + DOWJ[cfg.legalHoliday] + '曜)を、前もって別の日に振り替えます。元の休日は出勤日になり、振り替えた日がその週の法定休日になります。休日を過ぎてからは登録できません(その場合は休日労働として35%増しです)。</div>' +
+    '<div class="attform"><label>スタッフ</label><select id="swStaff">' + list.map(s => '<option value="' + esc(s.id) + '"' + (s.id === def ? " selected" : "") + ">" + esc(s.name) + "</option>").join("") + "</select>" +
+    '<label>元の休日(この日に働く)</label><select id="swFrom">' + hols.map(x => '<option value="' + x + '">' + dlabel(x) + "</option>").join("") + "</select>" +
+    '<label>代わりに休む日</label><input id="swTo" type="date">' +
+    '<div id="swHint" style="font-size:13px;margin-top:6px;"></div>' +
+    '<label>メモ(任意)</label><input id="swNote" placeholder="例:友人の来店のため本人希望"></div>' +
+    '<div class="dlgbtns" style="margin-top:14px;"><button class="btn ghost" id="swNo">やめる</button><button class="btn primary" id="swYes">振り替える</button></div>';
+  if (!dlgAtt.open) dlgAtt.showModal();
+  const fromEl = document.getElementById("swFrom"), toEl = document.getElementById("swTo"), hint = document.getElementById("swHint");
+  const weekOf = x => addDays(x, -((jstDow(x) - cfg.weekStart + 7) % 7));
+  const sync = (resetTo) => {
+    if (resetTo) toEl.value = addDays(fromEl.value, 1);
+    const f = fromEl.value, t = toEl.value;
+    if (!t) { hint.textContent = ""; return; }
+    if (t === f || jstDow(t) === cfg.legalHoliday) { hint.innerHTML = '<span style="color:var(--shu)">代わりに休む日は、' + DOWJ[cfg.legalHoliday] + "曜以外の日にしてください</span>"; return; }
+    if (t <= T) { hint.innerHTML = '<span style="color:var(--shu)">代わりに休む日は、明日以降にしてください</span>'; return; }
+    hint.innerHTML = weekOf(f) === weekOf(t)
+      ? '<span style="color:var(--ok)">同じ週の中なので、週の労働時間は変わりません。</span>' + dlabel(t) + " が休みになります。"
+      : '<span style="color:var(--shu)">別の週になります。' + dlabel(f) + " の週は休みが減るので、その週の労働時間が" + cfg.weekLimit + "時間を超えた分は25%増しです。</span>";
+  };
+  fromEl.onchange = () => sync(true); toEl.onchange = () => sync(false); sync(true);
+  document.getElementById("swNo").onclick = () => dlgAtt.close();
+  document.getElementById("swYes").onclick = async () => {
+    const staff = document.getElementById("swStaff").value, from = fromEl.value, to = toEl.value;
+    if (!to || to === from || jstDow(to) === cfg.legalHoliday || to <= T) { alert("代わりに休む日を確かめてください"); return; }
+    const r = await askPin("承認する人の暗証番号", "owner", staffName(staff) + " さん " + dlabel(from) + " を出勤日に、" + dlabel(to) + " を休みにします");
+    if (!r) return;
+    try {
+      await attPost("/att/swap", { action: "add", staff, from, to, note: document.getElementById("swNote").value.trim(), auth: r });
+      dlgAtt.close(); await fetchAtt(); render();
+    } catch (e) { alert("振り替えられませんでした:\n" + e.message); }
+  };
+}
+
 /* ---- 月の勤怠CSV ---- */
 function attCsvText(ym) {
   const c = attCfg();
@@ -2747,7 +2816,7 @@ function attCsvText(ym) {
     if (!days.length) continue;
     for (const d of days) {
       const done = d.shifts.filter(x => x.out || x.ongoing);
-      rows.push([s.name, d.date, DOWJ[jstDow(d.date)], d.holiday ? "法定休日" : d.trip ? "外出・仕入れ" : "通常",
+      rows.push([s.name, d.date, DOWJ[jstDow(d.date)], d.holiday ? (d.swapOff ? "振替休日(法定休日)の労働" : "法定休日") : d.swapWork ? "振替出勤" : d.trip ? "外出・仕入れ" : "通常",
         done.map(x => jstHM(x.in)).join(" / "), done.map(x => x.out ? jstHM(x.out) : "勤務中").join(" / "),
         d.brk, d.gap, d.labor, d.within, d.ot, d.hol, d.night, d.paidBrk, d.payMin, d.fixed ? "あり" : "", d.notes.join(" / ")]);
     }
@@ -2759,6 +2828,9 @@ function attCsvText(ym) {
   const fx = ATT.fixes.filter(f => [f.ts, f.oldTs].some(t => t && jstDate(t).startsWith(ym))).sort((a, b) => a.reqAt - b.reqAt);
   rows.push([], ["修正の履歴"], ["スタッフ", "内容", "理由", "申請日時", "結果", "承認した人", "承認日時"]);
   for (const f of fx) rows.push([staffName(f.staff), fixLabel(f), f.reason, jstDate(f.reqAt) + " " + jstHM(f.reqAt), ({ pending: "承認待ち", approved: "承認", rejected: "却下" })[f.status], f.decidedBy ? staffName(f.decidedBy) : "", f.decidedAt ? jstDate(f.decidedAt) + " " + jstHM(f.decidedAt) : ""]);
+  const sw = attSwaps().filter(x => x.from.startsWith(ym) || x.to.startsWith(ym)).sort((a, b) => a.from < b.from ? -1 : 1);
+  rows.push([], ["休日の振替"], ["スタッフ", "元の休日", "振り替えた日", "状態", "メモ", "登録日時", "登録した人"]);
+  for (const x of sw) rows.push([staffName(x.staff), x.from, x.to, x.status === "active" ? "有効" : "取消" + (x.canceledAt ? "(" + jstDate(x.canceledAt) + ")" : ""), x.note || "", x.at ? jstDate(x.at) + " " + jstHM(x.at) : "", x.by ? staffName(x.by) : ""]);
   rows.push([], ["仕入れの報告"], ["スタッフ", "日", "①見たもの・買ったもの", "②聞いた話", "③店で試すこと", "④次も行く必要", "送信日時"]);
   for (const p of attReports(ym)) rows.push([staffName(p.staff), p.report.day, p.report.seen, p.report.heard, p.report.try, p.report.next, jstDate(p.ts) + " " + jstHM(p.ts)]);
   return rows.map(r => r.map(csvCell).join(",")).join("\n");
@@ -2832,7 +2904,7 @@ function renderAttend() {
   h += '<div style="overflow-x:auto;"><table class="atttbl"><tr><th class="l">日</th><th>出勤〜退勤</th><th>休憩</th><th>労働</th><th>時間外</th><th>休日</th><th>深夜</th></tr>';
   for (const d of days) {
     const done = d.shifts;
-    h += '<tr class="tap" data-day="' + esc(view.attStaff) + "|" + d.date + '"><td class="l' + (d.notes.length ? " w" : "") + '">' + md(d.date) + (d.trip ? " 🚗" : "") + (d.fixed ? " 修" : "") + (d.notes.length ? " ⚠" : "") + "</td><td>" +
+    h += '<tr class="tap" data-day="' + esc(view.attStaff) + "|" + d.date + '"><td class="l' + (d.notes.length ? " w" : "") + '">' + md(d.date) + (d.trip ? " 🚗" : "") + (d.fixed ? " 修" : "") + (d.swapWork || d.swapOff ? " 振" : "") + (d.notes.length ? " ⚠" : "") + "</td><td>" +
       done.map(x => jstHM(x.in) + "〜" + (x.out ? jstHM(x.out) : "")).join(" ") + "</td><td>" + hmm(d.brk) + "</td><td>" + hmm(d.labor) + '</td><td class="' + (d.ot ? "w" : "") + '">' + (d.ot ? hmm(d.ot) : "") +
       '</td><td class="' + (d.hol ? "w" : "") + '">' + (d.hol ? hmm(d.hol) : "") + "</td><td>" + (d.night ? hmm(d.night) : "") + "</td></tr>";
   }
@@ -2869,6 +2941,14 @@ function renderAttend() {
   for (const s of ATT.staff) h += '<div class="kv"><span>' + esc(s.name) + (s.role === "owner" ? ' <span style="font-size:12px;color:var(--dim);">承認する人</span>' : "") + (s.active === false ? ' <span style="font-size:12px;color:var(--dim);">退職</span>' : "") +
     '</span><button class="btn ghost" style="padding:4px 12px;font-size:13px;" data-staff="' + esc(s.id) + '">変更・暗証番号</button></div>';
   h += '<div class="kv"><span>勤怠の設定</span><span style="font-size:13px;">目安 週' + (cfg.weekTarget || "−") + "時間(上限 " + cfg.weekLimit + ")・" + DOWJ[cfg.weekStart] + "曜始まり・法定休日 " + (cfg.legalHoliday >= 0 ? DOWJ[cfg.legalHoliday] + "曜" : "なし") + "・休憩 " + (cfg.breakPaid ? "有給" : "無給") + "</span></div>";
+  {
+    const up = attSwaps().filter(x => x.status === "active" && (x.from >= T || x.to >= T)).sort((a, b) => a.from < b.from ? -1 : 1);
+    h += '<div class="kv"><span>休日の振替</span><span style="font-size:13px;">' + (up.length ? "予定 " + up.length + "件" : "予定なし") + "</span></div>";
+    for (const x of up) h += '<div class="fixcard"><b>' + esc(staffName(x.staff)) + "</b> " + dlabel(x.from) + " → " + dlabel(x.to) + " を休み" +
+      (x.note ? '<div class="r">' + esc(x.note) + "</div>" : "") +
+      (x.from > T && x.to > T ? '<div class="b"><button class="btn ghost" data-swapcancel="' + esc(x.id) + '">取り消す</button></div>' : "") + "</div>";
+  }
+  h += '<div style="display:flex;gap:10px;padding:10px 12px 0;"><button class="btn" id="btnSwap" style="flex:1;"' + (cfg.legalHoliday >= 0 ? "" : " disabled") + '>休日を振り替える</button></div>';
   h += '<div style="display:flex;gap:10px;padding:10px 12px 12px;"><button class="btn" id="btnAddStaff" style="flex:1;">スタッフを追加</button><button class="btn" id="btnAttCfg" style="flex:1;">設定を変える</button></div></section>';
   main.innerHTML = h;
 
@@ -2879,6 +2959,15 @@ function renderAttend() {
   main.querySelectorAll("[data-staff]").forEach(b => b.onclick = () => openStaffForm(b.dataset.staff));
   document.getElementById("btnAddStaff").onclick = () => openStaffForm(null);
   document.getElementById("btnAttCfg").onclick = openAttCfg;
+  document.getElementById("btnSwap").onclick = openSwap;
+  main.querySelectorAll("[data-swapcancel]").forEach(b => b.onclick = async () => {
+    const x = attSwaps().find(y => y.id === b.dataset.swapcancel);
+    if (!x) return;
+    const r = await askPin("振替を取り消す", "owner", staffName(x.staff) + " さん " + dlabel(x.from) + " → " + dlabel(x.to) + "\n取り消すと、元の休日がまた法定休日に戻ります");
+    if (!r) return;
+    try { await attPost("/att/swap", { action: "cancel", id: x.id, auth: r }); await fetchAtt(); render(); }
+    catch (e) { alert("取り消せませんでした:\n" + e.message); }
+  });
   document.getElementById("attYm").onchange = e => { view.attMonth = e.target.value; render(); };
   document.getElementById("attWho").onchange = e => { view.attStaff = e.target.value; render(); };
   document.getElementById("btnAttCsv").onclick = () => downloadFile("木琴_勤怠_" + ym + ".csv", attCsvText(ym));
@@ -2893,7 +2982,8 @@ function renderAttend() {
     if (!r) return;
     const files = { "attendance.csv": "﻿" + attCsvText(ym), "data.json": JSON.stringify({ month: ym, cfg: attCfg(), staff: ATT.staff,
       punches: ATT.punches.filter(p => jstDate(p.ts).startsWith(ym) || (p.report && (p.report.day || "").startsWith(ym))),
-      fixes: ATT.fixes.filter(f => [f.ts, f.oldTs].some(t => t && jstDate(t).startsWith(ym))) }) };
+      fixes: ATT.fixes.filter(f => [f.ts, f.oldTs].some(t => t && jstDate(t).startsWith(ym))),
+      swaps: attSwaps().filter(x => x.from.startsWith(ym) || x.to.startsWith(ym)) }) };
     try { await attPost("/att/lock", { month: ym, files, auth: r }); await fetchAtt(); render(); }
     catch (e) { alert("確定できませんでした:\n" + e.message); }
   };
@@ -2906,8 +2996,239 @@ function renderAttend() {
   };
 }
 
+/* ================= 茹での順番(2026-11-25) =================
+   注文票の蕎麦を「どの順で・何を一緒に茹でるか」に組む。釜は1つ・1釜4人前(普通1・大盛1.5・倍盛2)。
+   一緒に茹でられるのは同じ種類だけ:冷(細打ち)/温(温用麺)/温(細打ち。3日目の麺を含む)/釜揚げ(平打ち)。
+   並べ方:まだ茹でていない中でいちばん古いものを先頭に、同じ種類を4人前まで後ろから拾う(入らない物は飛ばす)。
+   順番=伝票の注文時刻(slip.ord。なければ作成時刻)。あとからの追加は追加した時刻。同じ伝票の同じ時刻なら冷→釜揚げ→温。
+   温蕎麦の麺は在庫と同じく温専用の麺(古い順)→細打ちを当てる。
+   記録(伝票に保存=共有台帳で全端末に同期):
+     slip.ord  注文の順番(ミリ秒)。「↑」で前の伝票の直前に動かす。slip.ordLog に履歴
+     slip.adds [{k, n, t}] 作成から3分を過ぎてからの追加(+タップ・追加読み取り)
+     slip.boil [{k, n, b}] 釜に入れた蕎麦(b=その釜の時刻。"manual"=「済みにする」)
+   「釜に入れた」1回で、その釜を固定し、ひとつ前の釜は茹で上がったものとする。会計済み・取消の伝票は対象外 */
+const POT_CAP = 4;
+const BOIL_KINDS = { cold: "冷（細打ち）", atsu: "温（温用麺）", warmHoso: "温（細打ち）", kama: "釜揚げ（平打ち）" };
+const isSobaKey = k => /^[1-6][a-f]$/.test(k);
+function slipCreated(slip) { return slip.created || Math.floor(Number(slip.id) / 100) || 0; }
+function slipOrd(slip) { return slip.ord != null ? slip.ord : slipCreated(slip); }
+function boiledCount(slip, k) { return (slip.boil || []).filter(x => x.k === k).reduce((a, x) => a + x.n, 0); }
+/* 伝票の蕎麦の数が変わったとき:作成から3分を過ぎた増加は「追加」として時刻を残す。減ったら新しい追加から減らす */
+function noteSobaChange(slip, k, d, forceAdd) {
+  if (!isSobaKey(k) || !d) return;
+  if (d > 0) {
+    if (forceAdd || Date.now() - slipCreated(slip) > 180000) (slip.adds = slip.adds || []).push({ k, n: d, t: Date.now() });
+    return;
+  }
+  let rm = -d;
+  const list = (slip.adds || []).filter(x => x.k === k).sort((a, b) => b.t - a.t);
+  for (const a of list) { if (rm <= 0) break; const t = Math.min(rm, a.n); a.n -= t; rm -= t; }
+  if (slip.adds) slip.adds = slip.adds.filter(x => x.n > 0);
+}
+/* 別会計で移した蕎麦の「茹でた」記録を新しい伝票へ移す */
+function moveBoiled(from, to, k, q) {
+  let mv = Math.min(q, boiledCount(from, k));
+  if (!mv) return;
+  for (const x of (from.boil || []).filter(x => x.k === k)) {
+    if (mv <= 0) break;
+    const t = Math.min(mv, x.n); x.n -= t; mv -= t;
+    (to.boil = to.boil || []).push({ k, n: t, b: x.b });
+  }
+  from.boil = (from.boil || []).filter(x => x.n > 0);
+}
+function boilSlips(dateStr) { return DB.slips.filter(sl => sl.date === dateStr && (sl.status === "open" || sl.status === "staff")); }
+/* 伝票の蕎麦を1杯ずつに分ける。古い順に「茹でた」分を消し、残り(まだ茹でていない分)を返す */
+function slipUnits(slip) {
+  const out = [];
+  const ord = slipOrd(slip);
+  for (const k of Object.keys(slip.items || {})) {
+    if (!isSobaKey(k)) continue;
+    const Q = slip.items[k] || 0;
+    if (Q <= 0) continue;
+    const adds = (slip.adds || []).filter(x => x.k === k).sort((a, b) => a.t - b.t);
+    let addN = adds.reduce((a, x) => a + x.n, 0);
+    const times = [];
+    for (let i = 0; i < Math.max(0, Q - addN); i++) times.push({ t: ord, add: false });
+    for (const a of adds) for (let i = 0; i < a.n && times.length < Q; i++) times.push({ t: Math.max(a.t, ord), add: true });
+    const row = Number(k[0]), col = k[1];
+    times.slice(Math.min(Q, boiledCount(slip, k))).forEach((x, i) => out.push({
+      id: slip.id + ":" + k + ":" + i, slip, k, row, col, w: SIZE_MULT[col], t: x.t, add: x.add,
+      cat: row <= 2 ? "cold" : row === 3 ? "kama" : "warm",
+    }));
+  }
+  return out;
+}
+const BOIL_RANK = { cold: 0, kama: 1, warm: 2 };
+function boilQueue(dateStr) {
+  const units = [];
+  for (const sl of boilSlips(dateStr)) units.push(...slipUnits(sl));
+  return units.sort((a, b) => a.t - b.t || slipOrd(a.slip) - slipOrd(b.slip) || String(a.slip.id).localeCompare(String(b.slip.id)) ||
+    BOIL_RANK[a.cat] - BOIL_RANK[b.cat] || a.row - b.row || a.col.localeCompare(b.col));
+}
+/* 温蕎麦に当てる麺の並び(温専用の麺を古い順に、尽きたら細打ち)と、今日もう茹でた温蕎麦の量 */
+function warmPoolState(dateStr) {
+  let pool = [];
+  try { pool = (noodleSim(dateStr)[dateStr] || {}).warmPool || []; } catch (e) { pool = []; }
+  let used = 0;
+  for (const sl of DB.slips) {
+    if (sl.date !== dateStr || sl.status === "void") continue;
+    for (const x of (sl.boil || [])) if (Number(x.k[0]) >= 4) used += x.n * SIZE_MULT[x.k[1]];
+  }
+  return { pool, used };
+}
+function warmKindAt(pool, p) {
+  let acc = 0;
+  for (const seg of pool) { acc += seg.qty; if (p < acc - 1e-9) return seg.atsu ? "atsu" : "warmHoso"; }
+  return "warmHoso";
+}
+/* 釜の予定を組む。first=「先にする」で次に回したい種類 */
+function planBatches(dateStr, first) {
+  let rest = boilQueue(dateStr);
+  const { pool, used } = warmPoolState(dateStr);
+  let p = used;
+  const kindOf = u => u.cat === "cold" ? "cold" : u.cat === "kama" ? "kama" : warmKindAt(pool, p);
+  const batches = [];
+  let guard = 0;
+  while (rest.length && guard++ < 500) {
+    let li = 0;
+    if (!batches.length && first) { const j = rest.findIndex(u => kindOf(u) === first); if (j >= 0) li = j; }
+    const lead = rest[li];
+    const kind = kindOf(lead);
+    const batch = { kind, units: [lead], w: lead.w };
+    if (lead.cat === "warm") p += lead.w;
+    for (let i = 0; i < rest.length; i++) {
+      if (i === li) continue;
+      const u = rest[i];
+      if (u.cat !== lead.cat || batch.w + u.w > POT_CAP + 1e-9) continue;
+      if (kindOf(u) !== kind) continue;
+      batch.units.push(u); batch.w += u.w;
+      if (u.cat === "warm") p += u.w;
+    }
+    const ids = new Set(batch.units.map(u => u.id));
+    rest = rest.filter(u => !ids.has(u.id));
+    batches.push(batch);
+  }
+  return batches;
+}
+/* いま釜に入っている(最後に「釜に入れた」)分 */
+function potNow(dateStr) {
+  let b = 0;
+  for (const sl of DB.slips) if (sl.date === dateStr) for (const x of (sl.boil || [])) if (typeof x.b === "number" && x.b > b) b = x.b;
+  if (!b) return null;
+  const items = [];
+  for (const sl of DB.slips) if (sl.date === dateStr) for (const x of (sl.boil || [])) if (x.b === b) items.push({ slip: sl, k: x.k, n: x.n });
+  return { b, items };
+}
+function unitLabel(slip, k) {
+  const sb = SOBA.find(x => x.row === Number(k[0]));
+  return (sb ? sb.name : k) + "　" + SIZE_NAME[k[1]] + ("def".includes(k[1]) ? "（コース）" : "");
+}
+function tableLabel(slip) { return slip.table ? (slip.table === "賄い" ? "賄い" : slip.table + "卓") : "卓?"; }
+function hmOf(ms) { const d = new Date(ms); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
+function fmtW(w) { return Number.isInteger(w) ? String(w) : w.toFixed(1); }
+/* 同じ伝票・同じ品・同じ盛りをまとめて表示 */
+function groupUnits(units) {
+  const g = [];
+  for (const u of units) {
+    const last = g.find(x => x.slip === u.slip && x.k === u.k);
+    if (last) { last.n++; last.add = last.add || u.add; } else g.push({ slip: u.slip, k: u.k, n: 1, add: u.add });
+  }
+  return g;
+}
+let boilPlan = [];       // 画面に出した予定(「釜に入れた」はこの中身を記録する)
+let boilFirst = null;    // 「先にする」で次に回した種類(この端末だけ・釜に入れたら消える)
+function renderBoil() {
+  const D = today();
+  const locked = isLocked(D);
+  boilPlan = planBatches(D, boilFirst);
+  if (boilFirst && (!boilPlan.length || boilPlan[0].kind !== boilFirst)) boilFirst = null;
+  const pot = potNow(D);
+  let h = "";
+  if (locked) h += '<div class="warn">今日は締めを確定しているので、茹での記録はできません。</div>';
+  /* 釜の中 */
+  if (pot) {
+    h += '<section class="block"><h2>釜の中 <span class="note">' + hmOf(pot.b) + " に入れた</span></h2>";
+    for (const it of pot.items) h += '<div class="kv"><span>' + esc(tableLabel(it.slip)) + "　" + esc(unitLabel(it.slip, it.k)) + '</span><b class="num">' + it.n + "</b></div>";
+    h += '<div style="padding:4px 12px 10px;text-align:right;"><button class="btn ghost" id="btnPotUndo" style="padding:6px 12px;font-size:13px;"' + (locked ? " disabled" : "") + ">押し間違い:この釜を取り消す</button></div></section>";
+  }
+  /* 次の釜 */
+  if (!boilPlan.length) {
+    h += '<section class="block"><h2>次の釜</h2><div class="empty" style="padding:24px 12px;">茹でる蕎麦はありません</div></section>';
+  } else {
+    const b0 = boilPlan[0];
+    h += '<section class="block" style="border:2px solid var(--ink);"><h2>次の釜' + (boilFirst ? ' <span class="note" style="color:var(--shu);">入れ替え中</span>' : "") + "</h2>" +
+      '<div style="padding:10px 12px 0;font-size:26px;font-weight:700;">' + BOIL_KINDS[b0.kind] + '　<span class="num">' + fmtW(b0.w) + "</span>人前</div>" +
+      '<div style="padding:6px 12px 4px;">';
+    for (const g of groupUnits(b0.units)) h += '<div style="font-size:20px;padding:6px 0;border-top:1px solid var(--rule);display:flex;justify-content:space-between;gap:8px;"><span><b>' + esc(tableLabel(g.slip)) + "</b>　" + esc(unitLabel(g.slip, g.k)) + (g.add ? ' <span style="font-size:12px;color:var(--shu);">追加</span>' : "") + '</span><b class="num">×' + g.n + "</b></div>";
+    h += '</div><div style="padding:10px 12px 14px;"><button class="btn primary" id="btnPotIn" style="width:100%;padding:22px;font-size:24px;"' + (locked ? " disabled" : "") + ">釜に入れた</button></div></section>";
+  }
+  /* その次 */
+  if (boilPlan.length > 1) {
+    h += '<section class="block"><h2>その次 <span class="note">「先にする」で次の釜と入れ替え</span></h2>';
+    boilPlan.slice(1, 8).forEach((b, i) => {
+      h += '<div class="fixcard" style="display:flex;gap:10px;align-items:flex-start;"><div style="flex:1;"><b>' + (i + 2) + ". " + BOIL_KINDS[b.kind] + "　" + fmtW(b.w) + "人前</b>" +
+        '<div class="r">' + groupUnits(b.units).map(g => esc(tableLabel(g.slip)) + " " + esc(unitLabel(g.slip, g.k).replace("　", "・")) + (g.n > 1 ? "×" + g.n : "")).join("／") + "</div></div>" +
+        (b.kind !== boilPlan[0].kind ? '<button class="btn ghost" data-boilfirst="' + b.kind + '" style="padding:8px 12px;font-size:14px;white-space:nowrap;">先にする</button>' : "") + "</div>";
+    });
+    if (boilPlan.length > 8) h += '<div class="attnote">ほか ' + (boilPlan.length - 8) + " 釜</div>";
+    h += "</section>";
+  }
+  /* 注文の順番 */
+  const sl = boilSlips(D).filter(x => slipUnits(x).length).sort((a, b) => slipOrd(a) - slipOrd(b) || String(a.id).localeCompare(String(b.id)));
+  if (sl.length) {
+    h += '<section class="block"><h2>注文の順番 <span class="note">写真を撮り忘れた卓は「↑」で前へ</span></h2>';
+    sl.forEach((x, i) => {
+      const us = slipUnits(x);
+      const moved = (x.ordLog || []).length > 0;
+      h += '<div class="fixcard" style="display:flex;gap:8px;align-items:center;"><div style="flex:1;"><b>' + (i + 1) + ". " + esc(tableLabel(x)) + '</b> <span class="r">' + hmOf(slipOrd(x)) + (moved ? "・順番を変更" : "") + "</span>" +
+        '<div class="r">' + groupUnits(us).map(g => esc(unitLabel(g.slip, g.k).replace("　", "・")) + (g.n > 1 ? "×" + g.n : "") + (g.add ? "(追加)" : "")).join("／") + "</div></div>" +
+        (i > 0 ? '<button class="btn ghost" data-ordup="' + esc(String(x.id)) + '" style="padding:8px 14px;font-size:18px;"' + (locked ? " disabled" : "") + ">↑</button>" : "") +
+        '<button class="btn ghost" data-boildone="' + esc(String(x.id)) + '" style="padding:8px 10px;font-size:13px;white-space:nowrap;"' + (locked ? " disabled" : "") + ">済みにする</button></div>";
+    });
+    h += '<div class="attnote">「済みにする」は、茹で終わっているのに押し忘れた卓をこの一覧から外します。順番は会計済みになると自動で外れます。</div></section>';
+  }
+  main.innerHTML = h;
+
+  const bi = document.getElementById("btnPotIn");
+  if (bi) bi.onclick = () => {
+    if (!boilPlan.length) return;
+    const b = Date.now();
+    const touched = new Set();
+    for (const g of groupUnits(boilPlan[0].units)) { (g.slip.boil = g.slip.boil || []).push({ k: g.k, n: g.n, b }); touched.add(g.slip); }
+    boilFirst = null;
+    save(); for (const x of touched) pushSlipNow(x);
+    render();
+  };
+  const bu = document.getElementById("btnPotUndo");
+  if (bu) bu.onclick = () => {
+    if (!pot || !confirm("いま釜の中にある分を「まだ茹でていない」に戻しますか?")) return;
+    const touched = new Set(pot.items.map(it => it.slip));
+    for (const x of touched) x.boil = (x.boil || []).filter(e => e.b !== pot.b);
+    save(); for (const x of touched) pushSlipNow(x);
+    render();
+  };
+  main.querySelectorAll("[data-boilfirst]").forEach(el => el.onclick = () => { boilFirst = el.dataset.boilfirst; render(); });
+  main.querySelectorAll("[data-ordup]").forEach(el => el.onclick = () => {
+    const i = sl.findIndex(x => String(x.id) === el.dataset.ordup);
+    if (i <= 0) return;
+    const x = sl[i], prev = sl[i - 1], pp = sl[i - 2];
+    const a = slipOrd(prev), z = pp ? slipOrd(pp) : a - 120000;
+    const to = Math.round((a + z) / 2) === a ? a - 1 : Math.round((a + z) / 2);
+    (x.ordLog = x.ordLog || []).push({ from: slipOrd(x), to, at: Date.now() });
+    x.ord = to;
+    save(); pushSlipNow(x); render();
+  });
+  main.querySelectorAll("[data-boildone]").forEach(el => el.onclick = () => {
+    const x = sl.find(y => String(y.id) === el.dataset.boildone);
+    if (!x || !confirm(tableLabel(x) + " の残りの蕎麦を、茹で済みにしますか?")) return;
+    for (const g of groupUnits(slipUnits(x))) (x.boil = x.boil || []).push({ k: g.k, n: g.n, b: "manual" });
+    save(); pushSlipNow(x); render();
+  });
+}
+
 /* ---- タブ ---- */
 document.getElementById("tabSlips").onclick = () => { view.tab = "slips"; view.mode = "list"; render(); refreshSoon(); };
+document.getElementById("tabBoil").onclick = () => { view.tab = "boil"; view.mode = "list"; render(); refreshSoon(); };
 document.getElementById("tabStock").onclick = () => { view.tab = "stock"; view.stockDate = today(); render(); refreshSoon(); };
 document.getElementById("tabClose").onclick = () => { view.tab = "close"; render(); refreshSoon(); };
 /* 予約管理アプリ(別アプリ mokkin-yoyaku)を開く。①入口だけ一緒にする方式(2026-11-13)。

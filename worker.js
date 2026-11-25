@@ -33,6 +33,8 @@
  *   POST /att/decide {fixId, decision, auth}  修正の承認・却下(承認する人)
  *   POST /att/cfg    {cfg, auth}           勤怠の設定(週の上限・起算日・法定休日・休憩の有給/無給)
  *   POST /att/lock   {month, unlock, files, auth}  月の勤怠を確定(R2の attendance/<月>/ に控え)
+ *   POST /att/swap   {action:"add"|"cancel", staff, from, to, note, id, auth}  休日の振替(2026-11-19)
+ *        法定休日(from)を前もって別の日(to)に振り替える。元の休日より前にしか登録・取消できない(事後は代休=休日労働)
  */
 
 const READ_PROMPT = `あなたは手書き注文票の読み取り係です。画像は蕎麦屋「木琴」のご注文票(様式 FORM: KIK-1)です。
@@ -52,7 +54,9 @@ const READ_PROMPT = `あなたは手書き注文票の読み取り係です。�
 3. 枠外に書かれた数字は、最も近い行・マスの値として解釈する
 4. 「コースの数」と「コースの蕎麦(d/e/f列)の合計」は一致するはず。曖昧なマスの解釈にはこの整合を使ってよい
 5. 読みに確信が持てないマス、枠外記入、二重訂正のあったマスは flags に理由付きで挙げる
-6. 印刷された数字(記入例の2と1など)は手書きではないので無視する
+6. 右下の「記入例」の枠は印刷された見本で、読み取りの対象外。枠の中の数字(2と1)、塗りつぶしの跡、文字はすべて無視し、注文にも flags にも含めない。番地(T・N・C・1a〜6f・G1〜G7)のあるマスだけを読む
+7. ただし記入例の枠に赤ペンなどで手書きの記入があれば、注文には含めず、flags に {"cell": "記入例", "理由": "記入例の枠に手書きあり"} を挙げる
+8. 番地のないところに印刷された数字や記号は、手書きではないので無視する
 
 出力規則(最重要):
 - どんな場合でも、応答は次のJSONオブジェクト1個だけ。説明文・前置き・コードブロック記号・謝罪は一切禁止
@@ -200,7 +204,7 @@ async function handleAttend(request, env, path) {
       env.DB.prepare("SELECT data FROM att_staff").all(),
       env.DB.prepare("SELECT data FROM att_punch ORDER BY ts").all(),
       env.DB.prepare("SELECT data FROM att_fix").all(),
-      env.DB.prepare("SELECT k, v FROM meta WHERE k = 'att_cfg' OR k = 'att_cfghist' OR k LIKE 'attlock:%' OR k LIKE 'attlockhist:%'").all(),
+      env.DB.prepare("SELECT k, v FROM meta WHERE k = 'att_cfg' OR k = 'att_cfghist' OR k = 'att_swaps' OR k LIKE 'attlock:%' OR k LIKE 'attlockhist:%'").all(),
     ]);
     const meta = {};
     for (const r of mt.results) meta[r.k] = r.v;
@@ -361,6 +365,45 @@ async function handleAttend(request, env, path) {
     return json({ ok: true, cfg });
   }
 
+
+  if (path === "/att/swap") {
+    const owner = await checkPin(env, auth.id, auth.pin, "owner");
+    if (!owner) return json({ ok: false, error: "承認する人の暗証番号が違います" }, 403);
+    let list = [];
+    try { list = JSON.parse(await getMeta(env, "att_swaps") || "[]"); } catch (e) {}
+    const today = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+    const isDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d || "");
+    const dow = d => new Date(d + "T00:00:00Z").getUTCDay();
+    const locked = async d => !!(await getMeta(env, "attlock:" + d.slice(0, 7)));
+    if (body.action === "cancel") {
+      const sw = list.find(x => x.id === String(body.id || ""));
+      if (!sw || sw.status !== "active") return json({ ok: false, error: "その振替は見つからないか、もう取り消されています" }, 404);
+      if (sw.from <= today || sw.to <= today) return json({ ok: false, error: "元の休日か振替の日をもう迎えているので、取り消せません" }, 409);
+      sw.status = "canceled"; sw.canceledAt = Date.now(); sw.canceledBy = owner.id;
+      await setMeta(env, "att_swaps", JSON.stringify(list));
+      return json({ ok: true, swap: sw });
+    }
+    const staffId = String(body.staff || "");
+    const st = (await allStaff(env)).find(x => x.id === staffId && x.active !== false);
+    if (!st) return json({ ok: false, error: "そのスタッフが見つかりません" }, 404);
+    const from = String(body.from || ""), to = String(body.to || "");
+    if (!isDate(from) || !isDate(to) || from === to) return json({ ok: false, error: "日付が不正です" }, 400);
+    let cfg = { legalHoliday: 2 };
+    try { cfg = { ...cfg, ...(JSON.parse(await getMeta(env, "att_cfg") || "{}")) }; } catch (e) {}
+    if (!(cfg.legalHoliday >= 0)) return json({ ok: false, error: "法定休日が設定されていないので、振替はできません" }, 400);
+    if (dow(from) !== cfg.legalHoliday) return json({ ok: false, error: "元の日が法定休日の曜日ではありません" }, 400);
+    if (dow(to) === cfg.legalHoliday) return json({ ok: false, error: "振り替える日が、もともと法定休日の曜日です" }, 400);
+    if (from <= today || to <= today) return json({ ok: false, error: "振替は前もって決めるものなので、明日以降の日にしてください(過ぎた休日に働いた分は休日労働になります)" }, 400);
+    if (Math.abs(Date.parse(to) - Date.parse(from)) > 28 * 86400000) return json({ ok: false, error: "振り替える日は、元の休日の前後4週間以内にしてください" }, 400);
+    if (await locked(from) || await locked(to)) return json({ ok: false, error: "その月の勤怠は確定済みです" }, 409);
+    const act = list.filter(x => x.status === "active" && x.staff === staffId);
+    if (act.some(x => x.from === from)) return json({ ok: false, error: "その休日はもう振り替えてあります" }, 409);
+    if (act.some(x => x.to === to || x.from === to || x.to === from)) return json({ ok: false, error: "その日はほかの振替に使われています" }, 409);
+    const sw = { id: newId(), staff: staffId, from, to, note: String(body.note || "").slice(0, 200), at: Date.now(), by: owner.id, status: "active" };
+    list.push(sw);
+    await setMeta(env, "att_swaps", JSON.stringify(list));
+    return json({ ok: true, swap: sw });
+  }
   if (path === "/att/lock") {
     const owner = await checkPin(env, auth.id, auth.pin, "owner");
     if (!owner) return json({ ok: false, error: "承認する人の暗証番号が違います" }, 403);
